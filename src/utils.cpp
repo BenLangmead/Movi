@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "utils.hpp"
 #include "move_structure.hpp"
 

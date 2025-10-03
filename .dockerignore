@@ -1,0 +1,65 @@
+# Build directories
+build/
+build-*/
+build-debug/
+build-release/
+build-docker/
+build-ci/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile*
+docker/
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Documentation
+*.md
+docs/
+
+# Test data
+test-data-*/
+tests_data/
+tests/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Compiled binaries (will be built in container)
+movi*
+prepare_ref
+
+# CMake cache
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Dependencies
+_deps/
+external_repos/
+

@@ -1,0 +1,61 @@
+{
+    "name": "Movi Development Environment",
+    "dockerFile": "../docker/Dockerfile.dev",
+    "workspaceFolder": "/workspace",
+    
+    // Configure container features
+    "features": {
+        "ghcr.io/devcontainers/features/git:1": {},
+        "ghcr.io/devcontainers/features/github-cli:1": {}
+    },
+    
+    // VS Code extensions to install
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-vscode.cpptools-extension-pack",
+                "ms-vscode.cmake-tools",
+                "ms-vscode.makefile-tools",
+                "ms-python.python",
+                "ms-python.pylint",
+                "ms-toolsai.jupyter",
+                "ms-vscode.vscode-json",
+                "redhat.vscode-yaml",
+                "ms-vscode.vscode-markdown",
+                "ms-azuretools.vscode-docker"
+            ],
+            "settings": {
+                "C_Cpp.default.cppStandard": "c++20",
+                "C_Cpp.default.cStandard": "c17",
+                "cmake.buildDirectory": "${workspaceFolder}/build",
+                "cmake.configureOnOpen": true,
+                "files.associations": {
+                    "*.hpp": "cpp",
+                    "*.cpp": "cpp",
+                    "*.h": "c"
+                }
+            }
+        }
+    },
+    
+    // Port forwarding
+    "forwardPorts": [8080, 3000],
+    
+    // Post-create command
+    "postCreateCommand": "echo 'Movi development environment ready!' && gcc --version && cmake --version",
+    
+    // Mount the workspace
+    "mounts": [
+        "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached"
+    ],
+    
+    // User settings
+    "remoteUser": "developer",
+    
+    // Lifecycle scripts
+    "onCreateCommand": "echo 'Setting up Movi development environment...'",
+    "updateContentCommand": "echo 'Updating Movi development environment...'",
+    "postStartCommand": "echo 'Movi development environment started!'"
+}
+

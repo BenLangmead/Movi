@@ -1,11 +1,51 @@
+#include <algorithm>
 #include "read_processor.hpp"
-#include <cpuid.h>
 
-ReadProcessor::ReadProcessor(MoveStructure& mv_, int strands_ = 4, bool verbose_ = false, bool reverse_ = false) : mv(mv_) {
+#if defined(__APPLE__)
+    #include <sys/types.h>
+    #include <sys/sysctl.h>
+#elif defined(__linux__)
+    #include <unistd.h>
+#else
+    #include <cpuid.h>
+#endif
 
+static int get_cache_line_size() {
+
+    // Attempt at portable cache line size determination
+
+#if defined(__APPLE__)
+    size_t v = 0; size_t sz = sizeof(v);
+    if (sysctlbyname("hw.cachelinesize", &v, &sz, NULL, 0) == 0 && v > 0) return v;
+#elif defined(__linux__)
+    #ifdef _SC_LEVEL1_DCACHE_LINESIZE
+    {
+        long v = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+        if (v > 0) return (size_t)v;
+    }
+    #endif
+    {
+        FILE *f = fopen("/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size", "r");
+        if (f) {
+            unsigned long v = 0;
+            if (fscanf(f, "%lu", &v) == 1 && v > 0) { fclose(f); return (size_t)v; }
+            fclose(f);
+        }
+    }
+#else
     int cpu_info[4];
     __cpuid(0x80000006, cpu_info[0], cpu_info[1], cpu_info[2], cpu_info[3]);
     cache_line_size = (cpu_info[2] & 0xFF);
+    prefetch_step = cache_line_size/sizeof(MoveRow) - 1;
+#endif
+
+    return 64;
+}
+
+
+ReadProcessor::ReadProcessor(MoveStructure& mv_, int strands_ = 4, bool verbose_ = false, bool reverse_ = false) : mv(mv_) {
+
+    cache_line_size = get_cache_line_size();
     prefetch_step = cache_line_size/sizeof(MoveRow) - 1;
 
     verbose = verbose_;

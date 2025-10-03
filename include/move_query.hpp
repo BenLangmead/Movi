@@ -1,6 +1,8 @@
 #ifndef MOVE_QUERY_HPP
 #define MOVE_QUERY_HPP
 
+#include <algorithm>
+
 class MoveQuery {
     public:
         MoveQuery() {}

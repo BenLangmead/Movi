@@ -1,0 +1,32 @@
+# Development toolchain image - fast to rebuild, contains only build tools
+FROM gcc:11
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies and build tools
+RUN apt-get update && apt-get install -y \
+    cmake \
+    vim \
+    nano \
+    emacs-nox \
+    htop \
+    tree \
+    doxygen \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user for development
+RUN useradd -m -s /bin/bash developer \
+    && usermod -aG sudo developer \
+    && echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# Set working directory
+WORKDIR /workspace
+
+# Switch to developer user
+USER developer
+
+# Default command
+CMD ["/bin/bash"]
+
