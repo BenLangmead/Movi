@@ -92,3 +92,7 @@ target_compile_options(movi-tally PUBLIC -DMODE=5 -DCOLOR_MODE=0)
 add_executable(movi-tally-thresholds ${MOVI_MAIN_SOURCES})
 target_link_libraries(movi-tally-thresholds sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
 target_compile_options(movi-tally-thresholds PUBLIC -DMODE=7 -DCOLOR_MODE=0)
+
+add_executable(movi-co movi_co.cpp ${MOVI_SOURCES})
+target_link_libraries(movi-co sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
+target_compile_options(movi-co PUBLIC -DMODE=6 -DCOLOR_MODE=0)
