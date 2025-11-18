@@ -14,8 +14,10 @@
 #include <zlib.h>
 #include "kseq.h"
 
+#include "commons.hpp"
 #include "move_query.hpp"
 #include "movi_options.hpp"
+#include "version.hpp"
 
 // Forward declarations
 class MoveStructure;
@@ -29,7 +31,9 @@ const uint32_t MOVI_MAGIC = 0x4D4F5649;  // "Movi" in ASCII
 // Header for MOVI index files
 struct MoviHeader {
     uint32_t magic;      // Magic number to identify MOVI files
-    uint8_t version;     // Version number for future compatibility
+    uint8_t version = MOVI_VERSION_MAJOR; // Version number for future compatibility
+    uint8_t version_minor = MOVI_VERSION_MINOR; // Minor version number for future compatibility
+    uint8_t version_patch = MOVI_VERSION_PATCH; // Patch version number for future compatibility
     char type;           // Index mode (LARGE, CONSTANT, REGULAR, etc.)
     uint8_t reserved;    // Reserved for future use
 
@@ -42,7 +46,6 @@ struct MoviHeader {
 
     void init(char type_, uint64_t _length, uint64_t _r, uint64_t _original_r, uint64_t _end_bwt_idx) {
         magic = MOVI_MAGIC;
-        version = 2;
         type = type_;
         reserved = 0;
         length = _length;
@@ -60,14 +63,15 @@ struct MoviHeader {
 // Header for base profile format files
 struct BPFHeader {
     uint32_t magic;      // Magic number to identify BPF files
-    uint8_t version;     // Version number for future compatibility
+    uint8_t version = BPF_VERSION_MAJOR; // Major version number for future compatibility
+    uint8_t version_minor = BPF_VERSION_MINOR; // Minor version number for future compatibility
+    uint8_t version_patch = BPF_VERSION_PATCH; // Patch version number for future compatibility
     uint8_t entry_size;  // Size of each entry in bits (16, 32, or 64)
     uint16_t reserved;   // Reserved for future use
 
     // Initialize header with entry size
     void init(uint8_t size) {
         magic = BPF_MAGIC;
-        version = 1;
         entry_size = size;
         reserved = 0;
     }
@@ -92,6 +96,7 @@ enum class DataType {
 struct OutputFiles {
     std::ofstream mls_file;
     std::ofstream matches_file;
+    std::ofstream mems_file;
     std::ofstream costs_file;
     std::ofstream scans_file;
     std::ofstream fastforwards_file;
@@ -125,45 +130,6 @@ void close_kseq(kseq_t *seq, gzFile& fp);
 
 extern uint32_t alphamap_3[4][4];
 
-#define LARGE_INDEX MODE == 0
-#define CONSTANT_INDEX MODE == 1
-#define SPLIT_INDEX MODE == 4
-#define REGULAR_INDEX MODE == 3
-#define REGULAR_THRESHOLDS_INDEX MODE == 6
-#define BLOCKED_INDEX MODE == 2
-#define BLOCKED_THRESHOLDS_INDEX MODE == 8
-#define TALLY_INDEX MODE == 5
-#define TALLY_THRESHOLDS_INDEX MODE == 7
-
-#define NO_SAMPPLED_ID MODE == 0 or MODE == 1 or MODE == 2 or MODE == 4 or MODE == 8 or MODE == 3 or MODE == 6
-#define USE_THRESHOLDS MODE == 0 or MODE == 1 or MODE == 4 or MODE == 6 or MODE == 7 or MODE == 8
-#define NO_THRESHOLDS MODE == 2 or MODE == 3 or MODE == 5
-#define THRESHOLDS_WITHOUT_NEXTS MODE == 0 or MODE == 4 or MODE == 8 or MODE == 7 or MODE == 6
-#define USE_NEXT_POINTERS MODE == 1
-#define SPLIT_THRESHOLDS_FALSE MODE == 0 or MODE == 1 or MODE == 4
-#define SPLIT_THRESHOLDS_TRUE MODE == 8 or MODE == 7 or MODE == 6
-#define SPLIT_MAX_RUN MODE == 3 or MODE == 6 or MODE == 2 or MODE == 8 or MODE == 5 or MODE == 7
-#define SPLIT_ARRAY MODE == 1 or MODE == 4
-#define NO_EXTRA_TABLE MODE == 0 or MODE == 1 or MODE == 4 or MODE == 3 or MODE == 6
-#define REGULAR_MODES MODE == 3 or MODE == 6
-#define BLOCKED_MODES MODE == 2 or MODE == 8
-#define TALLY_MODES MODE == 5 or MODE == 7
-#define MOVI1_STYLE MODE == 0 or MODE == 1 or MODE == 4
-
-#define END_CHARACTER 0
-#define THRBYTES 5
-#define MIN_MATCHING_LENGTH 3
-#define NULL_READ_CHUNK 150
-#define NUM_NULL_READS 800 // 150,000 = 150 bp * 1000 reads
-#define NULL_READ_BOUND 1000
-
-#define UNCLASSIFIED_THRESHOLD 0.4
-
-#define ERROR_MSG(msg) (std::string("\033[31m\n\nError: ") + msg + "\033[0m")
-#define WARNING_MSG(msg) (std::string("\033[33m\n\nWarning: ") + msg + "\033[0m")
-#define INFO_MSG(msg) (std::string("\033[32m\n") + msg + "\n\033[0m")
-#define GENERAL_MSG(msg) (std::string("\033[37m") + msg + "\n\033[0m")
-
 // To be used for generating random numbers for each thread
 struct ThreadRandom {
     std::mt19937 generator;
@@ -180,6 +146,8 @@ struct ThreadRandom {
 };
 
 std::string program();
+
+void print_index_version(MoviHeader& header);
 
 std::string query_type(MoviOptions& movi_options);
 
@@ -206,6 +174,8 @@ void output_kmers(bool to_stdout, std::ofstream& kmer_file, size_t all_kmer_coun
 void output_logs(std::ofstream& costs_file, std::ofstream& scans_file, std::ofstream& fastforwards_file, MoveQuery& mq);
 
 void output_read(MoveQuery& mq);
+
+void output_mems(bool to_stdout, std::ofstream& mems_file, MoveQuery& mq);
 
 void open_output_files(MoviOptions& movi_options, OutputFiles& output_files);
 

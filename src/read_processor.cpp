@@ -66,6 +66,15 @@ ReadProcessor::ReadProcessor(MoveStructure& mv_, int strands_ = 4, bool verbose_
     negative_kmer_extension_count = 0;
     read_processed = 0;
     strands = strands_;
+    total_ff_count = 0;
+}
+
+uint64_t ReadProcessor::get_read_processed() {
+    return read_processed;
+}
+
+uint64_t ReadProcessor::get_total_ff_count() {
+    return total_ff_count;
 }
 
 bool ReadProcessor::next_read(Strand& process, BatchLoader& reader) {
@@ -95,7 +104,6 @@ bool ReadProcessor::next_read(Strand& process, BatchLoader& reader) {
 
         return false;
     } else {
-        // std::cerr << "No more reads to process!\n";
         return true;
     }
 }
@@ -228,8 +236,11 @@ void ReadProcessor::process_char(Strand& process) {
     char row_c = mv.alphabet[row.get_c()];
     std::string& R = process.mq.query();
     process.scan_count = 0;
-    if (mv.alphamap[static_cast<uint64_t>(R[process.pos_on_r])] == mv.alphamap.size()) {
+
+    if (!mv.check_alphabet(R[process.pos_on_r])) {
         process.match_len = 0;
+        if (mv.movi_options->is_debug())
+            DEBUG_MSG("[Read Processor] The character " + std::string(1, R[process.pos_on_r]) + " does not exist.");
     } else if (row_c == R[process.pos_on_r]) {
         // Case 1
         process.match_len += 1;
@@ -256,10 +267,10 @@ void ReadProcessor::process_char(Strand& process) {
             // min(new_lcp, match_len + 1)
             // But we cannot compute lcp here
             process.offset = up ? mv.get_n(process.idx) - 1 : 0;
-            if (verbose)
-                std::cerr << "\t idx: " << process.idx << " offset: " << process.offset << "\n";
+            if (mv.movi_options->is_debug())
+                DEBUG_MSG("\tidx: " + std::to_string(process.idx) + " offset: " + std::to_string(process.offset));
         } else {
-            std::cerr << "\t \t This should not happen!\n";
+            throw std::runtime_error(ERROR_MSG("\t\tCharacters should not mismatch after repositioning."));
         }
     }
 
@@ -344,10 +355,10 @@ void ReadProcessor::process_char_tally(Strand& process) {
                 // min(new_lcp, match_len + 1)
                 // But we cannot compute lcp here
                 process.offset = up ? mv.get_n(process.idx) - 1 : 0;
-                if (verbose)
-                    std::cerr << "\t idx: " << process.idx << " offset: " << process.offset << "\n";
+                if (mv.movi_options->is_debug())
+                    DEBUG_MSG("\t idx: " + std::to_string(process.idx) + " offset: " + std::to_string(process.offset));
             } else {
-                std::cerr << "\t \t This should not happen!\n";
+                throw std::runtime_error(ERROR_MSG("[Read Processor - tally mode] Characters should not mismatch after repositioning."));
             }
         }
         process.mq.add_ml(process.match_len, mv.movi_options->write_stdout_enabled());
@@ -603,8 +614,12 @@ void ReadProcessor::write_mls(Strand& process) {
             std::vector<uint16_t> matching_lens_16(process.mq.get_matching_lengths().begin(), process.mq.get_matching_lengths().end());
 
             bool found = classifier.classify(process.mq.get_query_id(), matching_lens_16, *mv.movi_options);
-            if (found and mv.movi_options->is_filter() && !mv.movi_options->is_no_output()) {
-                output_read(process.mq);
+            if (mv.movi_options->is_filter() && !mv.movi_options->is_no_output()) {
+                if (found && !mv.movi_options->is_invert()) {
+                    output_read(process.mq);
+                } else if (!found && mv.movi_options->is_invert()) {
+                    output_read(process.mq);
+                }
             }
         }
 
@@ -652,8 +667,10 @@ void ReadProcessor::compute_match_count(Strand& process) {
 
 void ReadProcessor::end_process() {
 
-    std::cerr << "no_ftab: " << mv.no_ftab << "\n";
-    std::cerr << "all_initializations: " << mv.all_initializations << "\n";
+    if (mv.movi_options->is_debug()) {
+        DEBUG_MSG("no_ftab: " + std::to_string(mv.no_ftab));
+        DEBUG_MSG("all_initializations: " + std::to_string(mv.all_initializations));
+    }
 
 
     if (!mv.movi_options->is_filter()) {
@@ -664,9 +681,6 @@ void ReadProcessor::end_process() {
         if (mv.movi_options->is_classify()) {
             classifier.close_report_file();
         }
-
-        // Close output files using the utility function
-        close_output_files(*(mv.movi_options), output_files);
     }
 }
 
@@ -684,7 +698,6 @@ void ReadProcessor::process_latency_hiding(BatchLoader& reader) {
     #pragma omp critical
     {
         finished_count = initialize_strands(processes, reader);
-        // std::cerr << strands << " processes are initiated.\n";
     }
 
     while (finished_count != strands) {
@@ -707,8 +720,10 @@ void ReadProcessor::process_latency_hiding(BatchLoader& reader) {
                     (is_zml and (processes[i].pos_on_r <= 0))) {
                     #pragma omp critical
                     {
-                        if (read_processed % 1000 == 0)
-                            std::cerr << read_processed << "\r";
+                        if (read_processed % 1000 == 0) {
+                            QUERY_PROGRESS_MSG("Number of reads processed: " + format_number_with_commas(read_processed));
+                        }
+
                         if (is_pml) {
                             write_mls(processes[i]);
                             reset_process(processes[i], reader);
@@ -769,7 +784,6 @@ void ReadProcessor::process_latency_hiding_tally(BatchLoader& reader) {
     #pragma omp critical
     {
         finished_count = initialize_strands(processes, reader);
-        // std::cerr << strands << " processes are initiated.\n";
     }
 
     while (finished_count != strands) {
@@ -782,8 +796,9 @@ void ReadProcessor::process_latency_hiding_tally(BatchLoader& reader) {
                 if (is_pml and processes[i].pos_on_r <= -1) {
                     #pragma omp critical
                     {
-                        if (read_processed % 1000 == 0)
-                            std::cerr << read_processed << "\r";
+                        if (read_processed % 1000 == 0) {
+                            QUERY_PROGRESS_MSG("Number of reads processed: " + format_number_with_commas(read_processed));
+                        }
 
                         write_mls(processes[i]);
                         reset_process(processes[i], reader);
@@ -816,7 +831,6 @@ void ReadProcessor::process_latency_hiding_tally(BatchLoader& reader) {
 /* void ReadProcessor::ziv_merhav_latency_hiding() {
     std::vector<Strand> processes;
     for(int i = 0; i < strands; i++) processes.emplace_back(Strand());
-    std::cerr << strands << " processes are created.\n";
 
     uint64_t finished_count = 0;
     for (uint64_t i = 0; i < strands; i++) {
@@ -890,7 +904,6 @@ uint64_t ReadProcessor::initialize_strands(std::vector<Strand>& processes, Batch
         }
     }
 
-    // std::cerr << strands << " processes are created.\n";
     for (uint64_t i = 0; i < strands; i++) {
         if (finished_count == 0) {
             if (mv.movi_options->is_kmer()) {
@@ -916,9 +929,6 @@ uint64_t ReadProcessor::initialize_strands(std::vector<Strand>& processes, Batch
         }
     }
 
-    if (empty_strands > 0) {
-        // std::cerr << "Warning: there are fewer reads (" << strands - empty_strands << ") than the number of strands (" << strands << ").\n";
-    }
     return finished_count;
 }
 
@@ -927,7 +937,9 @@ void ReadProcessor::kmer_search_latency_hiding(uint32_t k_, BatchLoader& reader)
 
     std::vector<Strand> processes;
     uint64_t finished_count = initialize_strands(processes, reader);
-    std::cerr << strands << " processes are initiated.\n";
+    if (mv.movi_options->is_debug()) {
+        INFO_MSG(std::to_string(strands) + " processes are initiated.");
+    }
 
     uint64_t total_bs = 0;
     // Assuming all the reads > k
@@ -937,20 +949,20 @@ void ReadProcessor::kmer_search_latency_hiding(uint32_t k_, BatchLoader& reader)
                 // 1: process next character
                 bool backward_search_finished = backward_search(processes[i], processes[i].kmer_end);
                 total_bs += 1;
-                if (verbose)
-                    std::cerr << backward_search_finished << " " << processes[i].kmer_start << " "
-                              << processes[i].kmer_end << " " << processes[i].pos_on_r << "\n";
+                if (mv.movi_options->is_debug())
+                    DEBUG_MSG(backward_search_finished + " " + std::to_string(processes[i].kmer_start) + " "
+                              + std::to_string(processes[i].kmer_end) + " " + std::to_string(processes[i].pos_on_r));
                 // if ((processes[i].pos_on_r == processes[i].kmer_start and processes[i].kmer_start != 0) or (processes[i].pos_on_r == -1 and processes[i].kmer_start == 0)) {
                 if (processes[i].pos_on_r == processes[i].kmer_start - 1) {
                     // 2: if the kmer is found
-                    if (verbose)
-                        std::cerr << processes[i].pos_on_r << " " << processes[i].kmer_start << "\n";
-                    /*if (!verify_kmer(processes[i], k)) {
-                        std::cerr << "kmer not verified!\n";
-                        exit(0);
-                    }*/
-                    if (verbose)
-                        std::cerr << "+ ";
+                    if (mv.movi_options->is_debug())
+                        DEBUG_MSG(std::to_string(processes[i].pos_on_r) + " " + std::to_string(processes[i].kmer_start));
+                        /*if (!verify_kmer(processes[i], k)) {
+                            std::cerr << "kmer not verified!\n";
+                            exit(0);
+                        }*/
+                    if (mv.movi_options->is_debug())
+                        DEBUG_MSG("+ ");
                     if (processes[i].kmer_start >= 0) {
                         positive_kmer_count += 1;
                         if (processes[i].kmer_extension)
@@ -997,8 +1009,8 @@ void ReadProcessor::kmer_search_latency_hiding(uint32_t k_, BatchLoader& reader)
                         }
                     }
                 } else if (processes[i].kmer_start < 0) {
-                    if (verbose)
-                        std::cerr << "- ";
+                    if (mv.movi_options->is_debug())
+                        DEBUG_MSG("- ");
                     reset_kmer_search(processes[i], reader);
                     next_kmer_search(processes[i]);
                     // 3: -- check if it was the last read in the file -> finished_count++
@@ -1014,14 +1026,13 @@ void ReadProcessor::kmer_search_latency_hiding(uint32_t k_, BatchLoader& reader)
         }
     }
 
-    std::cerr << "\n";
-    std::cerr << "total_bs: " << total_bs << "\n";
-    std::cerr << "positive_kmer_count: " << positive_kmer_count << "\n";
-    std::cerr << "negative_kmer_count: " << negative_kmer_count << "\n";
-    std::cerr << "total_kmer_count: " << total_kmer_count << "\n";
-    std::cerr << "kmer_extension_stopped_count: " << kmer_extension_stopped_count << "\n";
-    std::cerr << "kmer_extension_count: " << kmer_extension_count << "\n";
-    std::cerr << "negative_kmer_extension_count: " << negative_kmer_extension_count << "\n\n";
+    INFO_MSG("total_bs: " + std::to_string(total_bs));
+    INFO_MSG("positive_kmer_count: " + std::to_string(positive_kmer_count));
+    INFO_MSG("negative_kmer_count: " + std::to_string(negative_kmer_count));
+    INFO_MSG("total_kmer_count: " + std::to_string(total_kmer_count));
+    INFO_MSG("kmer_extension_stopped_count: " + std::to_string(kmer_extension_stopped_count));
+    INFO_MSG("kmer_extension_count: " + std::to_string(kmer_extension_count));
+    INFO_MSG("negative_kmer_extension_count: " + std::to_string(negative_kmer_extension_count));
 }
 
 void ReadProcessor::reset_backward_search(Strand& process) {
@@ -1138,11 +1149,11 @@ bool ReadProcessor::backward_search(Strand& process, uint64_t end_pos) {
     // 2) No character on the read exists in the alphabet
     // The first_iteration condition should be only true after the reset_backward_search function
     std::string& R = process.mq.query();
-    if (verbose)
-        std::cerr << "backward search begins:\n" << process.pos_on_r << " "
-                    << R[process.pos_on_r] << " "
-                    << mv.alphabet[mv.rlbwt[process.range.run_start].get_c()] << " "
-                    << mv.alphabet[mv.rlbwt[process.range.run_end].get_c()] << "\n";
+    if (mv.movi_options->is_debug())
+        DEBUG_MSG("backward search begins:" + std::to_string(process.pos_on_r) + " "
+                    + std::string(1, R[process.pos_on_r]) + " "
+                    + std::string(1, static_cast<char>(mv.alphabet[mv.rlbwt[process.range.run_start].get_c()])) + " "
+                    + std::string(1, static_cast<char>(mv.alphabet[mv.rlbwt[process.range.run_end].get_c()])));
     bool first_iteration = process.pos_on_r == end_pos;
     if (first_iteration) {
         if (process.range.is_empty()) {
@@ -1195,16 +1206,16 @@ bool ReadProcessor::backward_search(Strand& process, uint64_t end_pos) {
     // Store the current range as range_prev in case the range becomes empty after the update
     // If the range becomes empty, it means that the match cannot be extended.
     process.range_prev = process.range;
-    if (verbose)
-        std::cerr << "before: " << process.range.run_start << " " << process.range.run_end << " "
-                    << static_cast<uint64_t>(mv.rlbwt[process.range.run_start].get_c()) << " "
-                    << mv.alphabet[mv.rlbwt[process.range.run_end].get_c()] << "\n";
+    if (mv.movi_options->is_debug())
+        DEBUG_MSG("before: " + std::to_string(process.range.run_start) + " " + std::to_string(process.range.run_end) + " "
+                    + std::to_string(static_cast<uint64_t>(mv.rlbwt[process.range.run_start].get_c())) + " "
+                    + std::string(1, static_cast<char>(mv.alphabet[mv.rlbwt[process.range.run_end].get_c()])));
     mv.update_interval(process.range, R[process.pos_on_r - 1]);
-    if (verbose)
-        std::cerr << "after: " << process.range.run_start << " " << process.range.run_end << " "
-                    << static_cast<uint64_t>(mv.rlbwt[process.range.run_start].get_c()) << " "
-                    << mv.alphabet[mv.rlbwt[process.range.run_start].get_c()] << " "
-                    << mv.alphabet[mv.rlbwt[process.range.run_end].get_c()] << "\n";
+    if (mv.movi_options->is_debug())
+        DEBUG_MSG("after: " + std::to_string(process.range.run_start) + " " + std::to_string(process.range.run_end) + " "
+                    + std::to_string(static_cast<uint64_t>(mv.rlbwt[process.range.run_start].get_c())) + " "
+                    + std::string(1, static_cast<char>(mv.alphabet[mv.rlbwt[process.range.run_start].get_c()])) + " "
+                    + std::string(1, static_cast<char>(mv.alphabet[mv.rlbwt[process.range.run_end].get_c()])));
 
     return false;
 }

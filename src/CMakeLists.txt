@@ -1,11 +1,11 @@
 # release
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
 # debug:
-#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
 
 # compile with address sanitizer
-#add_compile_options(-fsanitize=address)
-#add_link_options(-fsanitize=address)
+# add_compile_options(-fsanitize=address)
+# add_link_options(-fsanitize=address)
 
 set(MOVI_SOURCES
     move_structure.cpp
@@ -19,10 +19,12 @@ set(MOVI_SOURCES
     read_processor.cpp
     utils.cpp
     sequitur.cpp
+    mem_finder.cpp
     emperical_null_database.cpp
     movi_parser.cpp
     classifier.cpp
     batch_loader.cpp
+    commons.cpp
 )
 
 set(MOVI_MAIN_SOURCES
@@ -35,18 +37,18 @@ add_library(movi_common INTERFACE)
 target_link_libraries(movi_common INTERFACE sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
 target_include_directories(movi_common INTERFACE ${CMAKE_SOURCE_DIR}/include)
 
-# Create library for tests (MODE=0)
+# Create library for tests
 add_library(movi_lib_test ${MOVI_SOURCES})
 target_link_libraries(movi_lib_test movi_common)
-target_compile_definitions(movi_lib_test PUBLIC MODE=0 COLOR_MODE=0)
+target_compile_definitions(movi_lib_test PRIVATE MODE=0 COLOR_MODE=0)
 
 
-add_executable(movi movi_launcher.cpp)
+add_executable(movi movi_launcher.cpp commons.cpp)
 
 # Main executables with their specific MODE configurations
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-add_executable(movi-prepare-ref prepare_ref.cpp)
+add_executable(movi-prepare-ref prepare_ref.cpp commons.cpp)
 target_link_libraries(movi-prepare-ref zlibstatic)
 
 add_executable(movi-large ${MOVI_MAIN_SOURCES})
@@ -85,13 +87,13 @@ add_executable(movi-blocked-thresholds ${MOVI_MAIN_SOURCES})
 target_link_libraries(movi-blocked-thresholds sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
 target_compile_options(movi-blocked-thresholds PUBLIC -DMODE=8 -DCOLOR_MODE=0)
 
-add_executable(movi-tally ${MOVI_MAIN_SOURCES})
-target_link_libraries(movi-tally sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
-target_compile_options(movi-tally PUBLIC -DMODE=5 -DCOLOR_MODE=0)
+add_executable(movi-sampled ${MOVI_MAIN_SOURCES})
+target_link_libraries(movi-sampled sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
+target_compile_options(movi-sampled PUBLIC -DMODE=5 -DCOLOR_MODE=0)
 
-add_executable(movi-tally-thresholds ${MOVI_MAIN_SOURCES})
-target_link_libraries(movi-tally-thresholds sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
-target_compile_options(movi-tally-thresholds PUBLIC -DMODE=7 -DCOLOR_MODE=0)
+add_executable(movi-sampled-thresholds ${MOVI_MAIN_SOURCES})
+target_link_libraries(movi-sampled-thresholds sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
+target_compile_options(movi-sampled-thresholds PUBLIC -DMODE=7 -DCOLOR_MODE=0)
 
 add_executable(movi-co movi_co.cpp ${MOVI_SOURCES})
 target_link_libraries(movi-co sdsl zlibstatic OpenMP::OpenMP_CXX hclust)

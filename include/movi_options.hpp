@@ -3,6 +3,9 @@
 
 #include <iostream>
 
+#include "commons.hpp"
+#include "move_row_configs.hpp"
+
 class MoviOptions {
     public:
         MoviOptions() {
@@ -15,6 +18,7 @@ class MoviOptions {
             pml_query = true;
         }
 
+        bool is_validate_flags() { return validate_flags; }
         bool is_no_header() { return no_header; }
         bool is_legacy_header() { return legacy_header; }
         bool is_adjusted_block() { return adjusted_block; }
@@ -39,10 +43,12 @@ class MoviOptions {
         bool is_count() { return count_query; }
         bool is_kmer() { return kmer_query; }
         bool is_kmer_count() { return kmer_count; }
+        bool is_mem() { return mem_query; }
         bool is_reverse() { return reverse; }
         bool is_multi_ftab() { return multi_ftab; }
         bool is_classify() { return classify; }
         bool is_filter() { return filter; }
+        bool is_invert() { return invert; }
         bool is_early_stop() { return early_stop; }
         bool is_report_colors() { return report_colors; }
         bool is_report_color_ids() { return report_color_ids; }
@@ -52,7 +58,9 @@ class MoviOptions {
         bool is_multi_classify() { return multi_classify; }
         bool is_generate_null_reads() { return generate_null_reads; }
         size_t get_bin_width() { return bin_width; }
+        uint64_t get_max_run_length() { return max_run_length; }
         int ignore_illegal_chars_status() { return ilc; }
+        bool use_separators() { return separators; }
         size_t get_strands() { return strands; }
         bool is_full_color() { return full_color; }
         bool is_compressed() { return compress; }
@@ -70,6 +78,7 @@ class MoviOptions {
         bool is_pvalue_scoring() { return pvalue_scoring; }
         size_t get_threads() { return threads; }
         uint32_t get_k () { return k; }
+        uint32_t get_min_mem_length() { return min_mem_length; }
         uint32_t get_ftab_k () { return ftab_k; }
         uint32_t get_tally_checkpoints () { return tally_checkpoints; }
         uint64_t get_SA_sample_rate() { return SA_sample_rate; }
@@ -83,6 +92,7 @@ class MoviOptions {
         std::string get_index_dir() { return index_dir; }
         std::string get_out_file() { return out_file; }
 
+        void set_validate_flags(bool validate_flags_) { validate_flags = validate_flags_; }
         void set_no_header(bool no_header_) { no_header = no_header_; }
         void set_legacy_header(bool legacy_header_) { legacy_header = legacy_header_; }
         void set_adjusted_block(bool adjusted_block_) { adjusted_block = adjusted_block_; }
@@ -99,12 +109,14 @@ class MoviOptions {
         void set_verify(bool verify_) { verify = verify_; }
         void set_random_repositioning(bool random_repositioning_) { random_repositioning = random_repositioning_; }
         void set_get_sa_entries(bool get_sa_entries_) { get_sa_entries = get_sa_entries_; }
-        void set_pml()   { pml_query = true; count_query = false; kmer_query = false; zml_query = false; }
-        void set_zml()   { zml_query = true; pml_query = false; count_query = false; kmer_query = false; }
-        void set_count() { count_query = true; pml_query = false; kmer_query = false; zml_query = false; }
-        void set_kmer()  { kmer_query = true; pml_query = false; count_query = false; zml_query = false; }
+        void set_pml()   { pml_query = true; count_query = false; kmer_query = false; zml_query = false; mem_query = false; }
+        void set_zml()   { zml_query = true; pml_query = false; count_query = false; kmer_query = false; mem_query = false; }
+        void set_count() { count_query = true; pml_query = false; kmer_query = false; zml_query = false; mem_query = false; }
+        void set_kmer()  { kmer_query = true; pml_query = false; count_query = false; zml_query = false; mem_query = false; }
+        void set_mem() { mem_query = true; pml_query = false; count_query = false; kmer_query = false; zml_query = false; }
         void set_kmer_count(bool kmer_count_) { kmer_count = kmer_count_; }
         void set_k(uint32_t k_) { k = k_; }
+        void set_min_mem_length(uint32_t min_mem_length_) { min_mem_length = min_mem_length_; }
         void set_ftab_k(uint32_t ftab_k_) { ftab_k = ftab_k_; }
         void set_tally_checkpoints(uint32_t tally_checkpoints_) { tally_checkpoints = tally_checkpoints_; }
         void set_SA_sample_rate(uint64_t SA_sample_rate_) { SA_sample_rate = SA_sample_rate_; }
@@ -115,6 +127,7 @@ class MoviOptions {
             filter = filter_;
             if (filter_) classify = true;  // Filter mode requires binary classification
         }
+        void set_invert(bool invert_) { invert = invert_; }
         void set_multi_classify(bool multi_classify_) { multi_classify = multi_classify_; }
         void set_early_stop(bool val) { early_stop = val; }
         void set_report_colors(bool report_colors_) { report_colors = report_colors_; }
@@ -124,6 +137,7 @@ class MoviOptions {
         void set_min_score_frac(float min_score_frac_) { min_score_frac = min_score_frac_; }
         void set_generate_null_reads(bool generate_null_reads_) { generate_null_reads = generate_null_reads_; }
         void set_bin_width(size_t bin_width_) { bin_width = bin_width_; }
+        void set_max_run_length(uint64_t max_run_length_) { max_run_length = max_run_length_; }
         bool set_ignore_illegal_chars(int ilc_) {
             if (ilc_ > 2 or ilc_ < 1)
                 return false;
@@ -132,6 +146,7 @@ class MoviOptions {
                 std::srand(time(0));
             return true;
         }
+        void set_use_separators(bool separators_) { separators = separators_; }
         void set_mmap(bool mmap_) { mmap = mmap_; }
         void set_prefetch(bool prefetch_) { prefetch = prefetch_; }
         void set_threads(size_t threads_) { threads = threads_; }
@@ -169,10 +184,12 @@ class MoviOptions {
             std::cerr << "mls_file:\t" << mls_file << "\n";
             std::cerr << "index_dir:\t" << index_dir << "\n";
             std::cerr << "LF_type:\t" << LF_type << "\n";
+            std::cerr << "validate_flags:\t" << validate_flags << "\n";
             std::cerr << "no_header:\t" << no_header << "\n";
             std::cerr << "adjusted_block:\t" << adjusted_block << "\n";
             std::cerr << "preprocessed:\t" << preprocessed << "\n";
             std::cerr << "ilc:\t" << ilc << "\n";
+            std::cerr << "separators:\t" << separators << "\n";
             std::cerr << "split:\t" << split << "\n";
             std::cerr << "thresholds:\t" << thresholds << "\n";
             std::cerr << "random_repositioning:\t" << random_repositioning << "\n";
@@ -182,12 +199,14 @@ class MoviOptions {
             std::cerr << "count_query:\t" << count_query << "\n";
             std::cerr << "kmer_query:\t" << kmer_query << "\n";
             std::cerr << "kmer_count:\t" << kmer_count << "\n";
+            std::cerr << "mem_query:\t" << mem_query << "\n";
             std::cerr << "reverse:\t" << reverse << "\n";
             std::cerr << "mmap:\t" << mmap << "\n";
             std::cerr << "prefetch:\t" << prefetch << "\n";
             std::cerr << "strands:\t" << strands << "\n";
             std::cerr << "threads:\t" << threads << "\n";
             std::cerr << "k:\t" << k << "\n";
+            std::cerr << "min_mem_length:\t" << min_mem_length << "\n";
             std::cerr << "ftab_k:\t" << ftab_k << "\n";
             std::cerr << "tally_checkpoints:\t" << tally_checkpoints << "\n";
             std::cerr << "SA_sample_rate:\t" << SA_sample_rate << "\n";
@@ -195,8 +214,10 @@ class MoviOptions {
             std::cerr << "verify:\t" << verify << "\n";
             std::cerr << "classify:\t" << classify << "\n";
             std::cerr << "filter:\t" << filter << "\n";
+            std::cerr << "invert:\t" << invert << "\n";
             std::cerr << "generate_null_reads:\t" << generate_null_reads << "\n";
             std::cerr << "bin_width:\t" << bin_width << "\n";
+            std::cerr << "max_run_length:\t" << max_run_length << "\n";
             std::cerr << "no_output:\t" << no_output << "\n";
             std::cerr << "small_pml_lens:\t" << small_pml_lens << "\n";
             std::cerr << "large_pml_lens:\t" << large_pml_lens << "\n";
@@ -215,10 +236,12 @@ class MoviOptions {
         std::string index_dir;
         std::string LF_type;
         std::string out_file = "";
+        bool validate_flags = false;
         bool no_header = false;
         bool adjusted_block = true;
         bool preprocessed = false;
         int ilc = 0;
+        bool separators = false;
         bool split = false;
         bool thresholds = false;
         bool random_repositioning = false;
@@ -228,12 +251,14 @@ class MoviOptions {
         bool count_query = false;
         bool kmer_query = false;
         bool kmer_count = false;
+        bool mem_query = false;
         bool reverse = false;
         bool mmap = false;
         bool prefetch = true;
         size_t strands = 16;
         size_t threads = 1;
         uint32_t k = 31;
+        uint32_t min_mem_length = 25;
         uint32_t ftab_k = 0;
         uint32_t tally_checkpoints = 20;
         uint64_t SA_sample_rate = 100;
@@ -241,6 +266,7 @@ class MoviOptions {
         bool verify = false;
         bool classify = false;
         bool filter = false;
+        bool invert = false;
         bool multi_classify = false;
         bool early_stop = false;
         bool report_colors = false;
@@ -250,6 +276,7 @@ class MoviOptions {
         float min_score_frac = 0;
         bool generate_null_reads = false;
         size_t bin_width = 150;
+        uint64_t max_run_length = MAX_RUN_LENGTH;
 
         bool no_output = false;
         bool small_pml_lens = false;

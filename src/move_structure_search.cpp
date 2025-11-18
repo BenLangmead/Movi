@@ -214,7 +214,8 @@ MoveInterval MoveStructure::try_ftab(MoveQuery& mq, int32_t& pos_on_r, uint64_t&
                         mq.add_ml(i, movi_options->is_stdout());
                     }
                 }
-                if (movi_options->is_zml() or movi_options->is_kmer()) {
+                // Shoudn't we always set this?
+                if (movi_options->is_zml() or movi_options->is_kmer() or movi_options->is_mem()) {
                     match_len = ftab_k - 1;
                 }
                 pos_on_r = pos_on_r - ftab_k + 1;
@@ -236,7 +237,10 @@ MoveBiInterval MoveStructure::initialize_bidirectional_search(MoveQuery& mq, int
     // Without the following condition, the match_len will be increamented in the following line
     if (match_len == 0) {
         bi_interval.match_len = match_len;
-        return bi_interval;
+        // For MEM we still need to initialize the rc interval
+        if (!movi_options->is_mem()) {
+            return bi_interval;
+        }
     }
     // This is needed because of the way match_len is off by one
     match_len += 1;
@@ -260,7 +264,6 @@ MoveInterval MoveStructure::initialize_backward_search(MoveQuery& mq, int32_t& p
     size_t ftab_k = movi_options->get_ftab_k();
     if (movi_options->is_multi_ftab()) {
         while (ftab_k > 1 and pos_on_r >= ftab_k - 1) {
-            //std::cerr << ftab_k << "\n";
             MoveInterval ftab_res = try_ftab(mq, pos_on_r, match_len, ftab_k, rc);
             if (!ftab_res.is_empty())
                 return ftab_res;
@@ -327,6 +330,11 @@ uint64_t MoveStructure::backward_search_step(std::string& R, int32_t& pos_on_r, 
     }
 
     return ff_count;
+}
+
+// Must be called using reverse interval
+bool MoveStructure::forward_search_step(char c, MoveInterval& rc_interval) {
+    return backward_search_step(complement(c), rc_interval);
 }
 
 uint64_t MoveStructure::query_backward_search(MoveQuery& mq, int32_t& pos_on_r) {

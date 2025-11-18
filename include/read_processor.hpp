@@ -54,7 +54,9 @@ struct Strand {
 
 class ReadProcessor {
     public:
-        ReadProcessor(MoveStructure& mv_, int strands_, bool verbose_, bool reverse_);
+        ReadProcessor(MoveStructure& mv_, int strands_, bool verbose_, bool reverse_, OutputFiles& output_files, Classifier& classifier);
+        uint64_t get_read_processed();
+        uint64_t get_total_ff_count();
         // void process_regular();
         uint64_t initialize_strands(std::vector<Strand>& processes, BatchLoader& reader);
         void process_latency_hiding(BatchLoader& reader);
@@ -84,11 +86,11 @@ class ReadProcessor {
 #endif
     private:
         MoveStructure& mv;
-        Classifier classifier;
+        Classifier& classifier;
         int cache_line_size;
         int prefetch_step;
         int l;
-        OutputFiles output_files;
+        OutputFiles& output_files;
         int strands;
         uint32_t k;
         bool verbose = false;
@@ -100,6 +102,7 @@ class ReadProcessor {
         uint64_t kmer_extension_count;
         uint64_t kmer_extension_stopped_count;
         uint64_t negative_kmer_extension_count;
+        uint64_t total_ff_count;
         std::chrono::time_point<std::chrono::high_resolution_clock> t1;
 };
 

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include "utils.hpp"
 #include "move_structure.hpp"
+#include "commons.hpp"
 
 uint32_t alphamap_3[4][4] = {{3, 0, 1, 2},
                              {0, 3, 1, 2},
@@ -30,12 +31,19 @@ std::string program() {
     return "blocked-thresholds";
 #endif
 #if MODE == 5
-    return "tally";
+    return "sampled";
 #endif
 #if MODE == 7
-    return "tally-thresholds";
+    return "sampled-thresholds";
 #endif
     throw std::runtime_error(ERROR_MSG("[program] The mode is not defined."));
+}
+
+void print_index_version(MoviHeader& header) {
+    INFO_MSG("Movi index version: "
+            + std::to_string(header.version) + "."
+            + std::to_string(header.version_minor) + "."
+            + std::to_string(header.version_patch));
 }
 
 std::string query_type(MoviOptions& movi_options) {
@@ -51,13 +59,15 @@ std::string query_type(MoviOptions& movi_options) {
         return "count";
     } else if (movi_options.is_kmer()) {
         return "kmers";
+    } else if (movi_options.is_mem()) {
+        return "mems";
     } else {
+        std::cerr << "Query_type: " << movi_options.is_pml() << " " << movi_options.is_zml() << " " << movi_options.is_count() << " " << movi_options.is_kmer() << " " << movi_options.is_mem() << "\n";
         throw std::runtime_error("Invalid query type");
     }
 }
 
 kseq_t* open_kseq(gzFile& fp, std::string file_address) {
-    std::cerr << "file_address: " << file_address << "\n";
     kseq_t *seq;
     // Solution for handling the stdin input: https://biowize.wordpress.com/2013/03/05/using-kseq-h-with-stdin/
     if (file_address == "-") {
@@ -72,14 +82,12 @@ kseq_t* open_kseq(gzFile& fp, std::string file_address) {
 
 void close_kseq(kseq_t *seq, gzFile& fp) {
     kseq_destroy(seq); // STEP 5: destroy seq
-    // std::cerr << "kseq destroyed!\n";
     gzclose(fp); // STEP 6: close the file handler
-    // std::cerr << "fp file closed!\n";
 }
 
 char complement(char c) {
     // # is the separator, complement(#) = #
-    char c_comp = c == '#' ? '#' : (c == 'A' ? 'T' : ( c == 'C' ? 'G' : (c == 'G' ? 'C' : 'A')));
+    char c_comp = c == SEPARATOR? SEPARATOR : (c == 'A' ? 'T' : ( c == 'C' ? 'G' : (c == 'G' ? 'C' : 'A')));
     return c_comp;
 }
 
@@ -105,7 +113,6 @@ std::string number_to_kmer(size_t j, size_t m, std::vector<unsigned char>& alpha
     std::string kmer = "";
     for (int i = m - 2; i >= 0; i -= 2) {
         size_t pair = (j >> i) & 0b11;
-        // std::cerr << i << " " << pair << " ";
         kmer += alphabet[pair + alphamap['A']];
     }
     return kmer;
@@ -168,27 +175,29 @@ void read_thresholds(std::string tmp_filename, std::vector<uint64_t>& thresholds
     uint64_t step_count = 0;
 
     for (uint64_t i = 0; i < length_thr; ++i) {
-        if (i % 1000000 == 0) {
-            std::cerr << "read thresholds:\t" << i << "\r";
+        if (i % 1000000 == 0 or i == length_thr - 1) {
+            print_progress_bar(i, length_thr - 1, "Reading thresholds");
         }
 
         threshold = 0;
         if ((fread(&threshold, THRBYTES, 1, fd)) != 1)
-            std::cerr <<("fread() file " + tmp_filename + " failed");
+            throw std::runtime_error(ERROR_MSG("[read_thresholds] fread() file " + tmp_filename + " failed"));
 
         // Detect a sudden drop in thresholds value (overflow)
         if (i > 0 and threshold != 0                                           /* Ignore first iteration and the row with sentinel character */
             and threshold < (thresholds[i-1] - step_count * MAX_5_BYTES)/10    /* Unusual drop in the threshold values */
             and (thresholds[i-1] - step_count * MAX_5_BYTES) > MAX_5_BYTES/10) /* last threshold was not too small */ {
 
-            std::cerr << "\n" << threshold << "\t" << thresholds[i-1] << "\t" << (thresholds[i-1] - step_count * MAX_5_BYTES) << "\n";
+            INFO_MSG("Threshold overflow detected, fixing...");
+            INFO_MSG("\n" + std::to_string(threshold) + "\t" + std::to_string(thresholds[i-1])
+                        + "\t" + std::to_string(thresholds[i-1] - step_count * MAX_5_BYTES));
             step_count += 1;
         }
 
         thresholds[i] = threshold + step_count * MAX_5_BYTES;
     }
 
-    std::cerr << "Finished reading " << length_thr << " thresholds.\n";
+    SUCCESS_MSG("Successfully read " + std::to_string(length_thr) + " thresholds");
 }
 
 template <typename T>
@@ -220,7 +229,7 @@ void output_base_stats(DataType data_type, bool to_stdout, std::ofstream& output
 
         if (data_type == DataType::match_length) {
 
-            std::vector<uint32_t>& matching_lengths = mq.get_matching_lengths();
+            std::vector<uint16_t>& matching_lengths = mq.get_matching_lengths();
             output_binary(matching_lengths, output_file);
 
         } else if (data_type == DataType::sa_entry) {
@@ -287,11 +296,26 @@ void output_read(MoveQuery& mq) {
 
 void print_query_stats(MoviOptions& movi_options, uint64_t total_ff_count, MoveStructure& mv) {
     if (movi_options.is_pml() or movi_options.is_zml()) {
-        std::cerr << "all fast forward counts: " << total_ff_count << "\n";
+        if (movi_options.is_verbose()) {
+            INFO_MSG("all fast forward counts: " + format_number_with_commas(total_ff_count));
+        }
     } else if (movi_options.is_kmer()) {
         mv.kmer_stats.print(movi_options.is_kmer_count());
     }
 }
+
+void output_mems(bool to_stdout, std::ofstream& mems_file, MoveQuery& mq) {
+    if (to_stdout) {
+        for (auto& mem : mq.get_mems()) {
+            std::cout << mq.get_query_id() << "\t" << mem.start << "\t" << mem.end << "\t" << mem.count << "\n";
+        }
+    } else {
+        for (auto& mem : mq.get_mems()) {
+            mems_file << mq.get_query_id() << "\t" << mem.start << "\t" << mem.end << "\t" << mem.count << "\n";
+        }
+    }
+}
+
 
 void open_output_files(MoviOptions& movi_options, OutputFiles& output_files) {
 
@@ -332,7 +356,7 @@ void open_output_files(MoviOptions& movi_options, OutputFiles& output_files) {
             std::string mls_file_name = out_file_name_prefix + ".bpf";
             output_files.mls_file = std::ofstream(mls_file_name, std::ios::out | std::ios::binary);
             BPFHeader header;
-            header.init(32);
+            header.init(16);
             header.write(output_files.mls_file);
         } else if (movi_options.is_count()) {
             std::string matches_file_name = out_file_name_prefix + ".matches";
@@ -340,6 +364,9 @@ void open_output_files(MoviOptions& movi_options, OutputFiles& output_files) {
         } else if (movi_options.is_kmer()) {
             std::string kmer_file_name = out_file_name_prefix + "." + std::to_string(movi_options.get_k());
             output_files.kmer_file = std::ofstream(kmer_file_name);
+        } else if (movi_options.is_mem()) {
+            std::string mems_file_name = out_file_name_prefix;
+            output_files.mems_file = std::ofstream(mems_file_name);
         }
 
         // Handle SA entries file
@@ -376,13 +403,13 @@ void close_output_files(MoviOptions& movi_options, OutputFiles& output_files) {
 
         if (movi_options.is_pml() || movi_options.is_zml()) {
             output_files.mls_file.close();
-            std::cerr << "The output file for the matching lengths closed.\n";
+            INFO_MSG("The output file for the matching lengths closed.");
         } else if (movi_options.is_count()) {
             output_files.matches_file.close();
-            std::cerr << "The count file is closed.\n";
+            INFO_MSG("The count file is closed.");
         } else if (movi_options.is_kmer()) {
             output_files.kmer_file.close();
-            std::cerr << "The kmer file is closed.\n";
+            INFO_MSG("The kmer file is closed.");
         }
 
         if (movi_options.is_get_sa_entries()) {

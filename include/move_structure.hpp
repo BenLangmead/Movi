@@ -24,13 +24,14 @@
 #include <unistd.h>
 #include "fastcluster.h"
 
-#include <sdsl/bit_vectors.hpp>
+#include "sdsl_wrapper.hpp"
 
 #include "movi_options.hpp"
 #include "move_row.hpp"
 #include "move_row_colored.hpp"
 #include "move_query.hpp"
 #include "sequitur.hpp"
+#include "mem_finder.hpp"
 #include "utils.hpp"
 #include "move_intervals.hpp"
 #include "doc_set.hpp"
@@ -40,6 +41,10 @@ class Classifier;
 
 // Forward declaration for SharedFastqReader (defined in movi_co.cpp)
 class SharedFastqReader;
+
+struct ThresholdsRow {
+    uint16_t values[4];
+};
 
 class MoveStructure {
     public:
@@ -51,6 +56,7 @@ class MoveStructure {
         uint64_t get_n(uint64_t idx);
         uint64_t get_offset(uint64_t idx);
         uint64_t get_id(uint64_t idx);
+        bool use_separator();
         // TODO: The following is useful for mmaping, there is a slowdown though
         // MoveRow& get_move_row(uint64_t idx);
 
@@ -76,6 +82,7 @@ class MoveStructure {
 
         void analyze_rows();
         void print_stats();
+        void print_basic_index_info();
 
 /***************************************************************************/
 /****  Beginning of functions implemented in move_structure_search.cpp  ****/
@@ -85,6 +92,7 @@ class MoveStructure {
 
         uint64_t query_backward_search(MoveQuery& mq, int32_t& pos_on_r);
         bool backward_search_step(char c, MoveInterval& interval);
+        bool forward_search_step(char c, MoveInterval& rc_interval);
         uint64_t backward_search_step(std::string& R, int32_t& pos_on_r, MoveInterval& interval);
         MoveInterval backward_search(std::string& R, int32_t& pos_on_r, MoveInterval interval, int32_t max_length);
         MoveInterval initialize_backward_search(MoveQuery& mq, int32_t& pos_on_r, uint64_t& match_len, bool rc = false);
@@ -113,6 +121,11 @@ class MoveStructure {
 
 #if USE_THRESHOLDS
         void compute_thresholds();
+        // Helper for threshold calculation
+        void debug_threshold_calculation(uint64_t i, uint64_t thr_i, uint64_t j, char rlbwt_c,
+                                         const std::vector<uint64_t>& alphabet_thresholds);
+        void set_threshold_for_one_character(uint64_t i, uint16_t threshold_index, uint64_t value,
+                                             uint16_t value_split, std::vector<uint64_t>& current_thresholds);
 #endif
 
 #if USE_NEXT_POINTERS
@@ -152,8 +165,16 @@ class MoveStructure {
         uint64_t reposition_up(uint64_t idx, char c, uint64_t& scan_count);
         uint64_t reposition_down(uint64_t idx, char c, uint64_t& scan_count);
         bool reposition_randomly(uint64_t& idx, uint64_t& offset, char r_char, uint64_t& scan_count);
+
+        uint64_t query_mems(MoveQuery& mq);
+        bool query_mem_bml(MoveQuery& mq, int32_t& pos_on_r,int32_t& min_mem_length, std::string& query_seq, size_t& ftab_k);
+        uint64_t query_all_mems(MoveQuery& mq);
+
 #if USE_THRESHOLDS
         bool reposition_thresholds(uint64_t& idx, uint64_t offset, char r_char, uint64_t& scan_count);
+        // Helper for threshold calculation
+        void handle_reposition_up(uint64_t& idx, uint64_t saved_idx, char r_char, uint16_t next_up, uint64_t& scan_count);
+        void handle_reposition_down(uint64_t& idx, uint64_t saved_idx, char r_char, uint16_t next_down, uint64_t& scan_count);
 #endif
 /*******  End of functions implemented in move_structure_query.cpp  *******/
 /***************************************************************************/
@@ -229,6 +250,8 @@ class MoveStructure {
         void read_counts_data(std::ifstream& fin);
         void write_main_table(std::ofstream& fout);
         void read_main_table(std::ifstream& fin, std::streamoff rlbwt_offset);
+        void write_separators_thresholds(std::ofstream& fout);
+        void read_separators_thresholds(std::ifstream& fin);
         void serialize();
         void deserialize();
         void output_ids();
@@ -320,11 +343,19 @@ class MoveStructure {
         uint64_t r;
         uint64_t original_r;
 
+        void compute_number_of_build_steps();
+        uint64_t total_build_steps = 0;
+        uint64_t current_build_step = 0;
+
         // The explicit values for the end bwt row
         uint64_t end_bwt_idx;
         uint64_t end_bwt_idx_thresholds[4];
         uint64_t end_bwt_idx_next_up[4];
         uint64_t end_bwt_idx_next_down[4];
+
+        // The explicit thresholds for the separators
+        std::vector<ThresholdsRow> separators_thresholds;
+        std::unordered_map<uint64_t, uint64_t> separators_thresholds_map;
 
         // Map from 2bit encoded character to the actual character
         // Example: alphabet[0] -> A, alphabet[1] -> C
