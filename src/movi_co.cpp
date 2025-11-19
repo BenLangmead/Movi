@@ -330,7 +330,11 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     
     // Master scheduler loop: coordinate reads and coroutine execution
     int active_coroutines = concurrency;
+    int iteration = 0;
+    int total_reads_served = 0;
+    
     while (active_coroutines > 0) {
+        iteration++;
         active_coroutines = 0;
         
         for (int i = 0; i < concurrency; ++i) {
@@ -338,8 +342,10 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
             
             // Check if this coroutine is waiting for a read
             if (waiting_handles[i]) {
+                total_reads_served++;
                 // Read next sequence and resume the coroutine
-                if (reader.read_next()) {
+                bool read_success = reader.read_next();
+                if (read_success) {
                     // Track total bases processed
                     const auto& read_data = reader.get_pending_read();
                     total_bases += read_data.sequence.length();
@@ -351,6 +357,8 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
                     }
                 } else {
                     // EOF - resume to let coroutine know there are no more reads
+                    cerr << "DEBUG: EOF detected after serving " << total_reads_served 
+                         << " reads to coroutines" << endl;
                     waiting_handles[i].resume();
                     waiting_handles[i] = nullptr;
                     if (!coroutines[i].is_done()) {
@@ -367,7 +375,22 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
                 }
             }
         }
+        
+        // Safety check
+        if (iteration > 100000 && total_reads_served < 2) {
+            cerr << "WARNING: After " << iteration << " iterations, only " 
+                 << total_reads_served << " reads served. Something is wrong." << endl;
+            cerr << "waiting_handles: ";
+            for (int j = 0; j < concurrency; ++j) {
+                cerr << (waiting_handles[j] ? "1" : "0") << " ";
+            }
+            cerr << endl;
+            break;
+        }
     }
+    
+    cerr << "Scheduler completed: " << iteration << " iterations, " 
+         << total_reads_served << " reads served to coroutines" << endl;
     
     // Calculate final statistics
     auto end_time = steady_clock::now();
