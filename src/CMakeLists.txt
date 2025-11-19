@@ -1,7 +1,9 @@
-# release
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
-# debug:
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+# Set compiler flags based on build type
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
+endif()
 
 # compile with address sanitizer
 # add_compile_options(-fsanitize=address)
