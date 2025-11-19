@@ -35,28 +35,22 @@ static int get_cache_line_size() {
 #else
     int cpu_info[4];
     __cpuid(0x80000006, cpu_info[0], cpu_info[1], cpu_info[2], cpu_info[3]);
-    cache_line_size = (cpu_info[2] & 0xFF);
-    prefetch_step = cache_line_size/sizeof(MoveRow) - 1;
+    int cache_line_size_val = (cpu_info[2] & 0xFF);
+    return cache_line_size_val > 0 ? cache_line_size_val : 64;
 #endif
 
     return 64;
 }
 
 
-ReadProcessor::ReadProcessor(MoveStructure& mv_, int strands_ = 4, bool verbose_ = false, bool reverse_ = false) : mv(mv_) {
+ReadProcessor::ReadProcessor(MoveStructure& mv_, int strands_, bool verbose_, bool reverse_, OutputFiles& output_files_, Classifier& classifier_) 
+    : mv(mv_), output_files(output_files_), classifier(classifier_) {
 
     cache_line_size = get_cache_line_size();
     prefetch_step = cache_line_size/sizeof(MoveRow) - 1;
 
     verbose = verbose_;
     reverse = mv_.movi_options->is_reverse();
-
-    // Open output files using the utility function
-    open_output_files(*(mv_.movi_options), output_files);
-
-    if (mv_.movi_options->is_classify()) {
-        classifier.initialize_report_file(*mv_.movi_options);
-    }
 
     total_kmer_count = 0;
     positive_kmer_count = 0;
