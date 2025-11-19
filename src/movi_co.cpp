@@ -321,6 +321,11 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     // Initialize all coroutines - use move semantics
     for (int i = 0; i < concurrency; ++i) {
         coroutines.push_back(std::move(mv.query_pml_coroutine(reader, waiting_handles[i], i)));
+        // Resume coroutines initially to get them started
+        // They start suspended, so we need to resume them to begin execution
+        if (coroutines[i].coro) {
+            coroutines[i].coro.resume();
+        }
     }
     
     // Master scheduler loop: coordinate reads and coroutine execution
