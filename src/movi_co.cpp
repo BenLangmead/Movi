@@ -380,9 +380,9 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
         nanoseconds_per_base = total_elapsed_ns / total_bases;
     }
     
-    cerr << "Completed processing (elapsed: " << std::fixed << std::setprecision(2) 
-              << total_elapsed << " sec, " << std::setprecision(1) << nanoseconds_per_base 
-              << " ns/base)" << endl;
+    cerr << "Completed processing (elapsed: " << std::fixed << std::setprecision(2)
+         << total_elapsed << " sec, " << std::setprecision(1) << nanoseconds_per_base
+         << " ns/base, bases=" << total_bases << ")" << endl;
 }
 
 void print_usage(const char* program_name) {
