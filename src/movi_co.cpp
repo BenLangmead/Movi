@@ -61,6 +61,7 @@ private:
     gzFile fp;
     kseq_t* seq;
     ReadData pending_read;
+    int read_call_count = 0;  // Add this
     
 public:
     SharedFastqReader(const string& fastq_file) : fp(nullptr), seq(nullptr) {
@@ -82,11 +83,19 @@ public:
     
     // Read next sequence into pending_read
     bool read_next() {
+        read_call_count++;
+        cerr << "DEBUG: read_next() called (call #" << read_call_count << ")" << endl;
         int l = kseq_read(seq);
         if (l < 0) {
+            cerr << "DEBUG: kseq_read returned " << l << " on call #" << read_call_count << endl;
+            // kseq_read returns:
+            // -1: EOF
+            // -2: truncated quality string  
+            // -3: error reading stream
             pending_read.valid = false;
             return false;
         }
+        cerr << "DEBUG: kseq_read returned length " << l << " on call #" << read_call_count << endl;
         pending_read.valid = true;
         pending_read.name = string(seq->name.s);
         pending_read.sequence = string(seq->seq.s);
