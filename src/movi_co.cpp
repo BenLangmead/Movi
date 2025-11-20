@@ -202,9 +202,12 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
     int64_t total_bases = 0;
     
     while (true) {
+        cerr << "DEBUG: Coroutine " << coroutine_id << " about to await next read" << endl;
         // Request next read - this suspends until scheduler reads it
         auto read_data = co_await get_next_read(reader, my_handle_storage);
         
+        cerr << "DEBUG: Coroutine " << coroutine_id << " resumed with read, valid=" 
+             << read_data.valid << endl;
         if (!read_data.valid) break;  // EOF
         
         read_count++;
@@ -302,6 +305,8 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             }
         }
         cout << endl;
+        cerr << "DEBUG: Coroutine " << coroutine_id << " finished processing read " 
+             << read_count << ", looping back" << endl;
     }
     
     co_return;
@@ -350,7 +355,10 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
         active_coroutines = 0;
         
         for (int i = 0; i < concurrency; ++i) {
-            if (coroutines[i].is_done()) continue;
+            if (coroutines[i].is_done()) {
+                cerr << "DEBUG: Coroutine " << i << " is done" << endl;
+                continue;
+            }
             
             // Check if this coroutine is waiting for a read
             if (waiting_handles[i]) {
