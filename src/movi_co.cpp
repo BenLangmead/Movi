@@ -142,7 +142,17 @@ struct MoveStructure::query_pml_coroutine_return_type {
         }
         suspend_always initial_suspend() { return {}; }
         suspend_always final_suspend() noexcept { return {}; }
-        void unhandled_exception() {}
+        void unhandled_exception() {
+            cerr << "DEBUG: Coroutine exception caught in unhandled_exception!" << endl;
+            try {
+                throw;  // Re-throw to see what it is
+            } catch (const std::exception& e) {
+                cerr << "DEBUG: Exception type: std::exception, what(): " << e.what() << endl;
+            } catch (...) {
+                cerr << "DEBUG: Exception type: unknown" << endl;
+            }
+            // For now, still swallow it to prevent crash, but we'll know it happened
+        }
         void return_void() {}
         suspend_always yield_value(monostate) noexcept { return {}; }
     };
@@ -227,6 +237,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         uint64_t ff_count_tot = 0, scan_count = 0;
         
         while (roff > -1) {
+            cerr << "DEBUG: Coroutine " << coroutine_id << " processing, roff=" << roff << endl;
             char row_c = alphabet[rlbwt[idx].get_c()];
             if (!check_alphabet(R[roff])) {  // char doens't exist in reference
                 match_len = 0;
@@ -281,7 +292,9 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             }
             my_prefetch_r((void*)(&(rlbwt[0]) + new_idx));
             offset = get_offset(idx) + offset;
+            cerr << "DEBUG: Coroutine " << coroutine_id << " about to co_yield (prefetch)" << endl;
             co_yield monostate{}; // wait for prefetch
+            cerr << "DEBUG: Coroutine " << coroutine_id << " resumed after co_yield" << endl;
             if (new_idx < r - 1 && offset >= get_n(new_idx)) {
                 uint64_t niter = 0;
                 while (new_idx < r - 1 && offset >= get_n(new_idx)) {
