@@ -114,8 +114,10 @@ struct read_awaitable {
     
     template<typename Promise>
     void await_suspend(coroutine_handle<Promise> h) {
+        cerr << "DEBUG: await_suspend storing handle for coroutine" << endl;
         *stored_handle = h;
-        // Scheduler will read and resume
+        cerr << "DEBUG: handle stored, waiting_handles[" << (stored_handle - waiting_handles) << "] = " 
+             << (stored_handle ? "non-null" : "null") << endl;
     }
     
     SharedFastqReader::ReadData await_resume() {
@@ -351,6 +353,7 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
             
             // Check if this coroutine is waiting for a read
             if (waiting_handles[i]) {
+                cerr << "DEBUG: Scheduler detected waiting_handles[" << i << "] is set" << endl;
                 total_reads_served++;
                 // Read next sequence and resume the coroutine
                 bool read_success = reader.read_next();
@@ -375,6 +378,8 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
                     }
                 }
             } else {
+                cerr << "DEBUG: Scheduler iteration " << iteration << ", coroutine " << i 
+                     << " not waiting (handle is " << (waiting_handles[i] ? "set" : "null") << ")" << endl;
                 // Not waiting for read - just resume (handles co_yield for voluntary suspension)
                 if (coroutines[i].coro) {
                     coroutines[i].coro.resume();
