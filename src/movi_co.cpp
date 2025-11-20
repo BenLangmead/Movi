@@ -48,6 +48,16 @@ using std::chrono::steady_clock;
 using std::chrono::duration_cast;
 using std::chrono::duration;
 
+// Global debug flag
+static bool debug_enabled = false;
+
+// DEBUG macro that only prints when NDEBUG is not defined and debug flag is set
+#ifndef NDEBUG
+#define DEBUG_MSG(msg) do { if (debug_enabled) { cerr << msg; } } while(0)
+#else
+#define DEBUG_MSG(msg) ((void)0)
+#endif
+
 // Shared reader that manages single gzFile and kseq_t
 class SharedFastqReader {
 public:
@@ -84,10 +94,10 @@ public:
     // Read next sequence into pending_read
     bool read_next() {
         read_call_count++;
-        cerr << "DEBUG: read_next() called (call #" << read_call_count << ")" << endl;
+        DEBUG_MSG("DEBUG: read_next() called (call #" << read_call_count << ")" << endl);
         int l = kseq_read(seq);
         if (l < 0) {
-            cerr << "DEBUG: kseq_read returned " << l << " on call #" << read_call_count << endl;
+            DEBUG_MSG("DEBUG: kseq_read returned " << l << " on call #" << read_call_count << endl);
             // kseq_read returns:
             // -1: EOF
             // -2: truncated quality string  
@@ -95,7 +105,7 @@ public:
             pending_read.valid = false;
             return false;
         }
-        cerr << "DEBUG: kseq_read returned length " << l << " on call #" << read_call_count << endl;
+        DEBUG_MSG("DEBUG: kseq_read returned length " << l << " on call #" << read_call_count << endl);
         pending_read.valid = true;
         pending_read.name = string(seq->name.s);
         pending_read.sequence = string(seq->seq.s);
@@ -114,11 +124,11 @@ struct read_awaitable {
     
     template<typename Promise>
     void await_suspend(coroutine_handle<Promise> h) {
-        cerr << "DEBUG: await_suspend storing handle for coroutine" << endl;
+        DEBUG_MSG("DEBUG: await_suspend storing handle for coroutine" << endl);
         *stored_handle = h;
-        cerr << "DEBUG: handle stored, stored_handle pointer is " 
+        DEBUG_MSG("DEBUG: handle stored, stored_handle pointer is " 
              << (stored_handle ? "non-null" : "null") << ", handle value is "
-             << (h ? "non-null" : "null") << endl;
+             << (h ? "non-null" : "null") << endl);
     }
     
     SharedFastqReader::ReadData await_resume() {
@@ -143,13 +153,13 @@ struct MoveStructure::query_pml_coroutine_return_type {
         suspend_always initial_suspend() { return {}; }
         suspend_always final_suspend() noexcept { return {}; }
         void unhandled_exception() {
-            cerr << "DEBUG: Coroutine exception caught in unhandled_exception!" << endl;
+            DEBUG_MSG("DEBUG: Coroutine exception caught in unhandled_exception!" << endl);
             try {
                 throw;  // Re-throw to see what it is
             } catch (const std::exception& e) {
-                cerr << "DEBUG: Exception type: std::exception, what(): " << e.what() << endl;
+                DEBUG_MSG("DEBUG: Exception type: std::exception, what(): " << e.what() << endl);
             } catch (...) {
-                cerr << "DEBUG: Exception type: unknown" << endl;
+                DEBUG_MSG("DEBUG: Exception type: unknown" << endl);
             }
             // For now, still swallow it to prevent crash, but we'll know it happened
         }
@@ -212,12 +222,12 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
     int64_t total_bases = 0;
     
     while (true) {
-        cerr << "DEBUG: Coroutine " << coroutine_id << " about to await next read" << endl;
+        DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " about to await next read" << endl);
         // Request next read - this suspends until scheduler reads it
         auto read_data = co_await get_next_read(reader, my_handle_storage);
         
-        cerr << "DEBUG: Coroutine " << coroutine_id << " resumed with read, valid=" 
-             << read_data.valid << endl;
+        DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " resumed with read, valid=" 
+             << read_data.valid << endl);
         if (!read_data.valid) break;  // EOF
         
         read_count++;
@@ -237,7 +247,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         uint64_t ff_count_tot = 0, scan_count = 0;
         
         while (roff > -1) {
-            cerr << "DEBUG: Coroutine " << coroutine_id << " processing, roff=" << roff << endl;
+            DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " processing, roff=" << roff << endl);
             char row_c = alphabet[rlbwt[idx].get_c()];
             if (!check_alphabet(R[roff])) {  // char doens't exist in reference
                 match_len = 0;
@@ -312,9 +322,9 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             }
             my_prefetch_r((void*)(&(rlbwt[0]) + new_idx));
             offset = get_offset(idx) + offset;
-            cerr << "DEBUG: Coroutine " << coroutine_id << " about to co_yield (prefetch)" << endl;
+            DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " about to co_yield (prefetch)" << endl);
             co_yield monostate{}; // wait for prefetch
-            cerr << "DEBUG: Coroutine " << coroutine_id << " resumed after co_yield" << endl;
+            DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " resumed after co_yield" << endl);
             if (new_idx < r - 1 && offset >= get_n(new_idx)) {
                 uint64_t niter = 0;
                 while (new_idx < r - 1 && offset >= get_n(new_idx)) {
@@ -338,8 +348,8 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             }
         }
         cout << endl;
-        cerr << "DEBUG: Coroutine " << coroutine_id << " finished processing read " 
-             << read_count << ", looping back" << endl;
+        DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " finished processing read " 
+             << read_count << ", looping back" << endl);
     }
     
     co_return;
@@ -394,13 +404,13 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
         
         for (int i = 0; i < concurrency; ++i) {
             if (coroutines[i].is_done()) {
-                cerr << "DEBUG: Coroutine " << i << " is done" << endl;
+                DEBUG_MSG("DEBUG: Coroutine " << i << " is done" << endl);
                 continue;
             }
             
             // Check if this coroutine is waiting for a read
             if (waiting_handles[i]) {
-                cerr << "DEBUG: Scheduler detected waiting_handles[" << i << "] is set" << endl;
+                DEBUG_MSG("DEBUG: Scheduler detected waiting_handles[" << i << "] is set" << endl);
                 total_reads_served++;
                 // Read next sequence and resume the coroutine
                 bool read_success = reader.read_next();
@@ -416,8 +426,8 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
                     }
                 } else {
                     // EOF - resume to let coroutine know there are no more reads
-                    cerr << "DEBUG: EOF detected after serving " << total_reads_served 
-                         << " reads to coroutines" << endl;
+                    DEBUG_MSG("DEBUG: EOF detected after serving " << total_reads_served 
+                         << " reads to coroutines" << endl);
                     waiting_handles[i].resume();
                     waiting_handles[i] = nullptr;
                     if (!coroutines[i].is_done()) {
@@ -425,8 +435,8 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
                     }
                 }
             } else {
-                cerr << "DEBUG: Scheduler iteration " << iteration << ", coroutine " << i 
-                     << " not waiting (handle is " << (waiting_handles[i] ? "set" : "null") << ")" << endl;
+                DEBUG_MSG("DEBUG: Scheduler iteration " << iteration << ", coroutine " << i 
+                     << " not waiting (handle is " << (waiting_handles[i] ? "set" : "null") << ")" << endl);
                 // Not waiting for read - just resume (handles co_yield for voluntary suspension)
                 if (coroutines[i].coro) {
                     coroutines[i].coro.resume();
@@ -470,7 +480,8 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
 }
 
 void print_usage(const char* program_name) {
-    cerr << "Usage: " << program_name << " <fastq_file> <index_dir> [concurrency]" << endl;
+    cerr << "Usage: " << program_name << " [--debug] <fastq_file> <index_dir> [concurrency]" << endl;
+    cerr << "  --debug:     Enable debug output" << endl;
     cerr << "  fastq_file: Input FASTQ file with reads" << endl;
     cerr << "  index_dir:  Directory containing the Movi index" << endl;
     cerr << "  concurrency: Number of concurrent coroutines (default: 1)" << endl;
@@ -480,24 +491,33 @@ void print_usage(const char* program_name) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 3 || argc > 4) {
+    int arg_idx = 1;
+    
+    // Parse --debug flag if present
+    if (argc > 1 && string(argv[arg_idx]) == "--debug") {
+        debug_enabled = true;
+        arg_idx++;
+    }
+    
+    // Check remaining arguments
+    if (argc - arg_idx < 2 || argc - arg_idx > 3) {
         cerr << "argc = " << argc << endl;
         print_usage(argv[0]);
         return 1;
     }
     
-    string fastq_file{argv[1]}, index_dir{argv[2]};
+    string fastq_file{argv[arg_idx]}, index_dir{argv[arg_idx + 1]};
     int concurrency = 1;
     
-    if (argc == 4) {
+    if (argc - arg_idx == 3) {
         try {
-            concurrency = std::stoi(argv[3]);
+            concurrency = std::stoi(argv[arg_idx + 2]);
             if (concurrency < 1) {
                 cerr << "Error: Concurrency must be at least 1" << endl;
                 return 1;
             }
         } catch (const exception& e) {
-            cerr << "Error: Invalid concurrency value: " << argv[3] << endl;
+            cerr << "Error: Invalid concurrency value: " << argv[arg_idx + 2] << endl;
             return 1;
         }
     }
