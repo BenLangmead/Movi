@@ -116,8 +116,9 @@ struct read_awaitable {
     void await_suspend(coroutine_handle<Promise> h) {
         cerr << "DEBUG: await_suspend storing handle for coroutine" << endl;
         *stored_handle = h;
-        cerr << "DEBUG: handle stored, waiting_handles[" << (stored_handle - waiting_handles) << "] = " 
-             << (stored_handle ? "non-null" : "null") << endl;
+        cerr << "DEBUG: handle stored, stored_handle pointer is " 
+             << (stored_handle ? "non-null" : "null") << ", handle value is "
+             << (h ? "non-null" : "null") << endl;
     }
     
     SharedFastqReader::ReadData await_resume() {
