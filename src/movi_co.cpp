@@ -356,7 +356,7 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     cerr << "Successfully loaded Movi index from: " << index_dir << endl;
     
     // movi-co requires separators - check and error if not present
-    if (!movi_options.use_separators()) {
+    if (!mv.use_separator()) {
         throw std::runtime_error(ERROR_MSG("[movi-co] This program requires an index with separators (mode 6). The loaded index does not use separators."));
     }
     
