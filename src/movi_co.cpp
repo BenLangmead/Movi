@@ -242,10 +242,10 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         auto& R = mq.query();
         int32_t roff = R.length() - 1;    // offset in read
         uint64_t idx = r - 1;             // row index
-        uint64_t offset = get_n(idx) - 1; // offset into row
         uint64_t match_len = 0;           // match length (consecurive case 1s) so far
         uint64_t ff_count_tot = 0, scan_count = 0;
-        
+        uint64_t offset = static_cast<uint16_t>(rlbwt[idx].n & (~mask_n)) - 1;
+
         while (roff > -1) {
             DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " processing, roff=" << roff << endl);
             char row_c = alphabet[rlbwt[idx].get_c()];
@@ -305,7 +305,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                 }
                 match_len = 0;
                 assert(alphabet[rlbwt[idx].get_c()] == R[roff] && "Repositioning failed - character mismatch");
-                offset = up ? get_n(idx) - 1 : 0;
+                offset = up ? (static_cast<uint16_t>(rlbwt[idx].n & (~mask_n)) - 1) : 0;
             }
             // At this point, if repositioning was needed it has been done
             // 'idx' and 'offset' are the new move-structure row index and offset
@@ -331,12 +331,14 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " about to co_yield (prefetch)" << endl);
             co_yield monostate{}; // wait for prefetch
             DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " resumed after co_yield" << endl);
-            if (new_idx < r - 1 && offset >= get_n(new_idx)) {
+            uint16_t n = static_cast<uint16_t>(rlbwt[new_idx].n & (~mask_n)) - 1;
+            if (new_idx < r - 1 && offset >= n) {
                 uint64_t niter = 0;
-                while (new_idx < r - 1 && offset >= get_n(new_idx)) {
-                    offset -= get_n(new_idx);
+                while (new_idx < r - 1 && offset >= n) {
+                    offset -= n;
                     niter++;
                     new_idx++;
+                    n = static_cast<uint16_t>(rlbwt[new_idx].n & (~mask_n)) - 1;
                 }
                 assert(niter < numeric_limits<uint16_t>::max());
                 ff_count_tot += static_cast<uint16_t>(niter);
