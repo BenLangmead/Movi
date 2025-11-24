@@ -1,7 +1,7 @@
 # Movi Project Makefile
 # Provides convenient targets for building, testing, and development
 
-.PHONY: help build build-debug build-release clean dev dev-build
+.PHONY: help build build-debug build-release build-profile clean dev dev-build
 
 # Default target
 help:
@@ -11,6 +11,7 @@ help:
 	@echo "  build          - Build Movi (Release mode)"
 	@echo "  build-debug    - Build Movi (Debug mode)"
 	@echo "  build-release  - Build Movi (Release mode)"
+	@echo "  build-profile  - Build Movi (Profile mode with gprof support)"
 	@echo "  clean          - Clean build directories"
 	@echo ""
 	@echo "Development targets:"
@@ -36,9 +37,15 @@ build-debug:
 	@cd build-debug && cmake .. -DCMAKE_BUILD_TYPE=Debug && make -j$$(nproc)
 	@echo "Build completed: build-debug/"
 
+build-profile:
+	@echo "Building Movi (Profile mode with gprof support)..."
+	@mkdir -p build-profile
+	@cd build-profile && cmake .. -DCMAKE_BUILD_TYPE=Profile && make -j$$(nproc)
+	@echo "Build completed: build-profile/"
+
 clean:
 	@echo "Cleaning build directories..."
-	@rm -rf build build-release build-debug
+	@rm -rf build build-release build-debug build-profile
 	@echo "Clean completed"
 
 
