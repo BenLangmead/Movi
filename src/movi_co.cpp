@@ -267,21 +267,27 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                         assert(idx > saved_idx);
                     }
                 } else {
-                    // Separators are always present in movi-co
-                    if (alphabet_index == 0) {
-                        throw std::runtime_error(ERROR_MSG("[query pml coroutine] the alphabet index equal to 0 should not happen with separators."));
+                    // Handle both separator and non-separator cases
+                    if (use_separator()) {
+                        if (alphabet_index == 0) {
+                            throw std::runtime_error(ERROR_MSG("[query pml coroutine] the alphabet index equal to 0 should not happen with separators."));
+                        }
+                        alphabet_index -= 1;`
                     }
-                    alphabet_index -= 1;
                     
                     char rlbwt_char = alphabet[rlbwt[idx].get_c()];
                     
-                    if (rlbwt_char == SEPARATOR) {
+                    if (use_separator() && rlbwt_char == SEPARATOR) {
                         // Handle separator case - use separators_thresholds
                         uint64_t threshold_value = separators_thresholds[separators_thresholds_map[idx]].values[alphabet_index];
                         up = offset < threshold_value;
                     } else {
-                        // Regular case - use alphamap_3 (with separator adjustment)
-                        alphabet_index = alphamap_3[alphamap[rlbwt_char] - 1][alphabet_index];
+                        // Regular case - use alphamap_3 (with or without separator adjustment)
+                        if (use_separator()) {
+                            alphabet_index = alphamap_3[alphamap[rlbwt_char] - 1][alphabet_index];
+                        } else {
+                            alphabet_index = alphamap_3[alphamap[rlbwt_char]][alphabet_index];
+                        }
                         
                         if (alphabet_index == 3) {
                             throw std::runtime_error(ERROR_MSG("[query pml coroutine] alphamap_3 is incorrect, alphabet_index = " + std::to_string(alphabet_index)));
@@ -364,11 +370,6 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     MoveStructure mv(&movi_options);
     mv.deserialize();
     cerr << "Successfully loaded Movi index from: " << index_dir << endl;
-    
-    // movi-co requires separators - check and error if not present
-    if (!mv.use_separator()) {
-        throw std::runtime_error(ERROR_MSG("[movi-co] This program requires an index with separators (mode 6). The loaded index does not use separators."));
-    }
     
     cout << "# Read_ID PML_Values" << endl;
     
