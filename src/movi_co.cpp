@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <variant>
 #include <stdexcept>
+#include <mutex>
 
 #include <sdsl/int_vector.hpp>
 #include <zlib.h>
@@ -57,6 +58,12 @@ static bool debug_enabled = false;
 #else
 #define DEBUG_MSG(msg) ((void)0)
 #endif
+
+// Mutex for thread-safe output from concurrent coroutines
+static std::mutex output_mutex;
+
+// Flush interval for periodic flushing
+static constexpr int FLUSH_INTERVAL = 100;  // Flush every 100 lines
 
 // Shared reader that manages single gzFile and kseq_t
 class SharedFastqReader {
@@ -220,6 +227,10 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
     
     int read_count = 0;
     int64_t total_bases = 0;
+    
+    // Per-coroutine output buffer
+    std::ostringstream output_buffer;
+    int buffer_line_count = 0;
     
     while (true) {
         DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " about to await next read" << endl);
@@ -390,18 +401,36 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             idx = new_idx;
         }
         
-        // Output results for this read
-        cout << read_data.name << " ";
+        // Output results for this read - append to buffer
+        output_buffer << read_data.name << " ";
         auto& matching_lengths = mq.get_matching_lengths();
         for (size_t i = 0; i < matching_lengths.size(); i++) {
-            cout << matching_lengths[i];
+            output_buffer << matching_lengths[i];
             if (i < matching_lengths.size() - 1) {
-                cout << " ";
+                output_buffer << " ";
             }
         }
-        cout << endl;
+        output_buffer << "\n";
+        buffer_line_count++;
+        
+        // Flush when buffer reaches FLUSH_INTERVAL lines
+        if (buffer_line_count >= FLUSH_INTERVAL) {
+            std::lock_guard<std::mutex> lock(output_mutex);
+            cout << output_buffer.str();
+            cout.flush();
+            output_buffer.str("");  // Clear the buffer
+            output_buffer.clear();  // Clear error flags
+            buffer_line_count = 0;
+        }
         DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " finished processing read " 
              << read_count << ", looping back" << endl);
+    }
+    
+    // Final flush of any remaining buffered output before returning
+    if (buffer_line_count > 0) {
+        std::lock_guard<std::mutex> lock(output_mutex);
+        cout << output_buffer.str();
+        cout.flush();
     }
     
     co_return;
@@ -493,18 +522,6 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
                 }
             }
         }
-        
-        // Safety check
-        if (iteration > 100000 && total_reads_served < 2) {
-            cerr << "WARNING: After " << iteration << " iterations, only " 
-                 << total_reads_served << " reads served. Something is wrong." << endl;
-            cerr << "waiting_handles: ";
-            for (int j = 0; j < concurrency; ++j) {
-                cerr << (waiting_handles[j] ? "1" : "0") << " ";
-            }
-            cerr << endl;
-            break;
-        }
     }
     
     cerr << "Scheduler completed: " << iteration << " iterations, " 
@@ -577,3 +594,4 @@ int main(int argc, char* argv[]) {
     }
     return 0;
 }
+
