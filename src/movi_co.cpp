@@ -245,6 +245,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         uint64_t match_len = 0;           // match length (consecurive case 1s) so far
         uint64_t ff_count_tot = 0, scan_count = 0;
         uint64_t offset = static_cast<uint16_t>(rlbwt[idx].n & (~mask_n)) - 1;
+        const bool use_separator = this->use_separator();
 
         while (roff > -1) {
             DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " processing, roff=" << roff << endl);
@@ -254,52 +255,94 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             } else if (row_c == R[roff]) {   // Case 1: Match
                 match_len++;
             } else {                         // Case 2: Reposition
+                const char r_ch = R[roff];
+                uint64_t r_ch_id = alphamap[static_cast<uint64_t>(r_ch)];
                 uint64_t saved_idx = idx;
-                uint64_t alphabet_index = alphamap[static_cast<uint64_t>(R[roff])];
                 bool up = false;
                 if (idx == end_bwt_idx) {
-                    up = offset < end_bwt_idx_thresholds[alphabet_index];
-                    if (up) {
-                        idx = reposition_up(saved_idx, R[roff], scan_count);
+                    up = offset < end_bwt_idx_thresholds[r_ch_id];
+                    if (up) { // reposition up
+                        if (saved_idx == 0) {
+                            idx = r;
+                        } else {
+                            char row_c_up_id = rlbwt[saved_idx].get_c();
+                            uint64_t repo_idx = saved_idx;
+                            while (repo_idx > 0 && row_c_up_id != r_ch_id) {
+                                repo_idx--;
+                                row_c_up_id = rlbwt[repo_idx].get_c();
+                            }
+                            idx = (row_c_up_id == r_ch_id) ? repo_idx : r;
+                        }
                         assert(idx < saved_idx);
-                    } else {
-                        idx = reposition_down(saved_idx, R[roff], scan_count);
+                    } else { // reposition down
+                        if (saved_idx == r - 1) {
+                            idx = r;
+                        } else {
+                            char row_c_dn_id = rlbwt[saved_idx].get_c();
+                            uint64_t repo_idx = saved_idx;
+                            while (repo_idx < r - 1 && row_c_dn_id != r_ch_id) {
+                                repo_idx++;
+                                row_c_dn_id = rlbwt[repo_idx].get_c();
+                            }
+                            idx = (row_c_dn_id == r_ch_id) ? repo_idx : r;
+                        }
                         assert(idx > saved_idx);
                     }
                 } else {
                     // Handle both separator and non-separator cases
-                    if (use_separator()) {
-                        if (alphabet_index == 0) {
+                    if (use_separator) {
+                        if (r_ch_id == 0) {
                             throw std::runtime_error(ERROR_MSG("[query pml coroutine] the alphabet index equal to 0 should not happen with separators."));
                         }
-                        alphabet_index -= 1;
+                        r_ch_id--;
                     }
                     
                     char rlbwt_char = alphabet[rlbwt[idx].get_c()];
                     
-                    if (use_separator() && rlbwt_char == SEPARATOR) {
+                    if (use_separator && rlbwt_char == SEPARATOR) {
                         // Handle separator case - use separators_thresholds
-                        uint64_t threshold_value = separators_thresholds[separators_thresholds_map[idx]].values[alphabet_index];
+                        uint64_t threshold_value = separators_thresholds[separators_thresholds_map[idx]].values[r_ch_id];
                         up = offset < threshold_value;
                     } else {
                         // Regular case - use alphamap_3 (with or without separator adjustment)
-                        if (use_separator()) {
-                            alphabet_index = alphamap_3[alphamap[rlbwt_char] - 1][alphabet_index];
+                        if (use_separator) {
+                            r_ch_id = alphamap_3[alphamap[rlbwt_char] - 1][r_ch_id];
                         } else {
-                            alphabet_index = alphamap_3[alphamap[rlbwt_char]][alphabet_index];
+                            r_ch_id = alphamap_3[alphamap[rlbwt_char]][r_ch_id];
                         }
                         
-                        if (alphabet_index == 3) {
-                            throw std::runtime_error(ERROR_MSG("[query pml coroutine] alphamap_3 is incorrect, alphabet_index = " + std::to_string(alphabet_index)));
+                        if (r_ch_id == 3) {
+                            throw std::runtime_error(ERROR_MSG("[query pml coroutine] alphamap_3 is incorrect, r_ch_id = " + std::to_string(r_ch_id)));
                         }
-                        up = offset < get_thresholds(idx, alphabet_index);
+                        up = offset < get_thresholds(idx, r_ch_id);
                     }
                     
                     if (up) {
-                        idx = reposition_up(saved_idx, R[roff], scan_count);
+                        if (saved_idx == 0) {
+                            idx = r;
+                        } else {
+                            char row_c_up = alphabet[rlbwt[saved_idx].get_c()];
+                            uint64_t repo_idx = saved_idx;
+                            while (repo_idx > 0 && row_c_up != r_ch) {
+                                repo_idx--;
+                                row_c_up = alphabet[rlbwt[repo_idx].get_c()];
+                            }
+                            idx = (row_c_up == r_ch) ? repo_idx : r;
+                        }
                         assert(idx < saved_idx);
                     } else {
-                        idx = reposition_down(saved_idx, R[roff], scan_count);
+                        if (saved_idx == r - 1) {
+                            idx = r;
+                        } else {
+                            char row_c = alphabet[rlbwt[saved_idx].get_c()];
+                            uint64_t temp_idx = saved_idx;
+                            while (temp_idx < r - 1 && row_c != r_ch) {
+                                scan_count += 1;
+                                temp_idx += 1;
+                                row_c = alphabet[rlbwt[temp_idx].get_c()];
+                            }
+                            idx = (row_c == r_ch) ? temp_idx : r;
+                        }
                         assert(idx > saved_idx);
                     }
                 }
