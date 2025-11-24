@@ -272,7 +272,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                         if (alphabet_index == 0) {
                             throw std::runtime_error(ERROR_MSG("[query pml coroutine] the alphabet index equal to 0 should not happen with separators."));
                         }
-                        alphabet_index -= 1;`
+                        alphabet_index -= 1;
                     }
                     
                     char rlbwt_char = alphabet[rlbwt[idx].get_c()];
