@@ -31,6 +31,12 @@ build-release:
 	@cd build-release && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$$(nproc)
 	@echo "Build completed: build-release/"
 
+build-release-debug:
+	@echo "Building Movi (ReleaseDebug mode)..."
+	@mkdir -p build-release-debug
+	@cd build-release-debug && cmake .. -DCMAKE_BUILD_TYPE=ReleaseDebug && make -j$$(nproc)
+	@echo "Build completed: build-release-debug/"
+
 build-debug:
 	@echo "Building Movi (Debug mode)..."
 	@mkdir -p build-debug
@@ -45,7 +51,7 @@ build-profile:
 
 clean:
 	@echo "Cleaning build directories..."
-	@rm -rf build build-release build-debug build-profile
+	@rm -rf build build-release build-debug build-profile build-release-debug
 	@echo "Clean completed"
 
 
