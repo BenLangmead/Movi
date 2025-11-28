@@ -312,11 +312,10 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                     }
                     
                     char rlbwt_char = alphabet[rlbwt[idx].get_c()];
-                    
+                    uint64_t threshold_value;
                     if (use_separator && rlbwt_char == SEPARATOR) {
                         // Handle separator case - use separators_thresholds
-                        uint64_t threshold_value = separators_thresholds[separators_thresholds_map[idx]].values[r_ch_id];
-                        up = offset < threshold_value;
+                        threshold_value = separators_thresholds[separators_thresholds_map[idx]].values[r_ch_id];
                     } else {
                         // Regular case - use alphamap_3 (with or without separator adjustment)
                         if (use_separator) {
@@ -324,39 +323,27 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                         } else {
                             r_ch_id_adj = alphamap_3[alphamap[rlbwt_char]][r_ch_id_adj];
                         }
-                        
-                        if (r_ch_id_adj == 3) {
-                            throw std::runtime_error(ERROR_MSG("[query pml coroutine] alphamap_3 is incorrect, r_ch_id = " + std::to_string(r_ch_id)));
-                        }
-                        up = offset < get_thresholds(idx, r_ch_id_adj);
+                        assert(r_ch_id_adj != 3);
+                        threshold_value = get_thresholds(idx, r_ch_id_adj);
                     }
                     
-                    if (up) {
-                        if (saved_idx == 0) {
-                            idx = r;
-                        } else {
-                            char row_c_up_id = rlbwt[saved_idx].get_c();
-                            uint64_t repo_idx = saved_idx;
-                            while (repo_idx > 0 && row_c_up_id != r_ch_id) {
-                                repo_idx--;
-                                row_c_up_id = rlbwt[repo_idx].get_c();
-                            }
-                            idx = (row_c_up_id == r_ch_id) ? repo_idx : r;
+                    if (offset < threshold_value) {
+                        char row_c_up_id = rlbwt[saved_idx].get_c();
+                        uint64_t repo_idx = saved_idx;
+                        while (repo_idx > 0 && row_c_up_id != r_ch_id) {
+                            repo_idx--;
+                            row_c_up_id = rlbwt[repo_idx].get_c();
                         }
+                        idx = (row_c_up_id == r_ch_id) ? repo_idx : r;
                         assert(idx < saved_idx);
                     } else {
-                        if (saved_idx == r - 1) {
-                            idx = r;
-                        } else {
-                            char row_c_dn_id = rlbwt[saved_idx].get_c();
-                            uint64_t temp_idx = saved_idx;
-                            while (temp_idx < r - 1 && row_c_dn_id != r_ch_id) {
-                                scan_count += 1;
-                                temp_idx += 1;
-                                row_c_dn_id = rlbwt[temp_idx].get_c();
-                            }
-                            idx = (row_c_dn_id == r_ch_id) ? temp_idx : r;
+                        char row_c_dn_id = rlbwt[saved_idx].get_c();
+                        uint64_t repo_idx = saved_idx;
+                        while (repo_idx < r - 1 && row_c_dn_id != r_ch_id) {
+                            repo_idx++;
+                            row_c_dn_id = rlbwt[repo_idx].get_c();
                         }
+                        idx = (row_c_dn_id == r_ch_id) ? repo_idx : r;
                         assert(idx > saved_idx);
                     }
                 }
