@@ -359,6 +359,8 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                     }
                 }
                 match_len = 0;
+                assert(idx < r);
+                assert(idx < rlbwt.size());
                 assert(alphabet[rlbwt[idx].get_c()] == R[roff] && "Repositioning failed - character mismatch");
                 offset = up ? (static_cast<uint16_t>(rlbwt[idx].n & (~mask_n)) - 1) : 0;
             }
