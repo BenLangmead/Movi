@@ -16,16 +16,13 @@
 #include <cstddef>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <iostream>
-#include <iomanip>
-#include <fstream>
 #include <string>
 #include <vector>
-#include <sstream>
 #include <algorithm>
 #include <variant>
 #include <stdexcept>
 #include <mutex>
+#include <cstring>
 
 #include <sdsl/int_vector.hpp>
 #include <zlib.h>
@@ -38,9 +35,6 @@
 
 using std::suspend_always;
 using std::coroutine_handle;
-using std::cout;
-using std::cerr;
-using std::endl;
 using std::string;
 using std::numeric_limits;
 using std::monostate;
@@ -52,11 +46,79 @@ using std::chrono::duration;
 // Global debug flag
 static bool debug_enabled = false;
 
+// Setup buffered stdout and stderr
+static FILE* stdout_buf = nullptr;
+static FILE* stderr_buf = nullptr;
+
+// Initialize buffered I/O
+static void init_buffered_io() {
+    stdout_buf = stdout;
+    stderr_buf = stderr;
+    // Use full buffering for stdout (better performance)
+    setvbuf(stdout_buf, nullptr, _IOFBF, 8192);
+    // Use line buffering for stderr (immediate error visibility)
+    setvbuf(stderr_buf, nullptr, _IOLBF, 0);
+}
+
+// Custom function to write unsigned integer to buffer, digit by digit
+// Returns number of bytes written
+static size_t write_uint_to_buffer(char* buffer, size_t buffer_size, uint64_t value) {
+    if (buffer_size == 0) return 0;
+    
+    // Handle zero case
+    if (value == 0) {
+        if (buffer_size > 0) {
+            buffer[0] = '0';
+            return 1;
+        }
+        return 0;
+    }
+    
+    // Calculate number of digits
+    uint64_t temp = value;
+    int num_digits = 0;
+    while (temp > 0) {
+        num_digits++;
+        temp /= 10;
+    }
+    
+    // Write digits from least to most significant, then reverse
+    if (static_cast<size_t>(num_digits) > buffer_size) {
+        num_digits = static_cast<int>(buffer_size);
+    }
+    
+    char* digits = buffer;
+    temp = value;
+    for (int i = 0; i < num_digits; i++) {
+        digits[i] = '0' + (temp % 10);
+        temp /= 10;
+    }
+    
+    // Reverse the digits
+    for (int i = 0; i < num_digits / 2; i++) {
+        char tmp = digits[i];
+        digits[i] = digits[num_digits - 1 - i];
+        digits[num_digits - 1 - i] = tmp;
+    }
+    
+    return static_cast<size_t>(num_digits);
+}
+
+// Custom function to write string to buffer
+static size_t write_string_to_buffer(char* buffer, size_t buffer_size, const char* str, size_t str_len) {
+    size_t copy_len = (str_len < buffer_size) ? str_len : buffer_size;
+    if (copy_len > 0) {
+        std::memcpy(buffer, str, copy_len);
+    }
+    return copy_len;
+}
+
 // DEBUG macro that only prints when NDEBUG is not defined and debug flag is set
+// Uses fprintf-style format strings
 #ifndef NDEBUG
-#define DEBUG_MSG(msg) do { if (debug_enabled) { cerr << msg; } } while(0)
+#define DEBUG_MSG(...) do { if (debug_enabled) { fprintf(stderr_buf, __VA_ARGS__); } } while(0)
 #else
-#define DEBUG_MSG(msg) ((void)0)
+#define DEBUG_MSG(...) ((void)0)
 #endif
 
 // Mutex for thread-safe output from concurrent coroutines
@@ -101,10 +163,10 @@ public:
     // Read next sequence into pending_read
     bool read_next() {
         read_call_count++;
-        DEBUG_MSG("DEBUG: read_next() called (call #" << read_call_count << ")" << endl);
+        DEBUG_MSG("DEBUG: read_next() called (call #%d)\n", read_call_count);
         int l = kseq_read(seq);
         if (l < 0) {
-            DEBUG_MSG("DEBUG: kseq_read returned " << l << " on call #" << read_call_count << endl);
+            DEBUG_MSG("DEBUG: kseq_read returned %d on call #%d\n", l, read_call_count);
             // kseq_read returns:
             // -1: EOF
             // -2: truncated quality string  
@@ -112,7 +174,7 @@ public:
             pending_read.valid = false;
             return false;
         }
-        DEBUG_MSG("DEBUG: kseq_read returned length " << l << " on call #" << read_call_count << endl);
+        DEBUG_MSG("DEBUG: kseq_read returned length %d on call #%d\n", l, read_call_count);
         pending_read.valid = true;
         pending_read.name = string(seq->name.s);
         pending_read.sequence = string(seq->seq.s);
@@ -131,11 +193,11 @@ struct read_awaitable {
     
     template<typename Promise>
     void await_suspend(coroutine_handle<Promise> h) {
-        DEBUG_MSG("DEBUG: await_suspend storing handle for coroutine" << endl);
+        DEBUG_MSG("DEBUG: await_suspend storing handle for coroutine\n");
         *stored_handle = h;
-        DEBUG_MSG("DEBUG: handle stored, stored_handle pointer is " 
-             << (stored_handle ? "non-null" : "null") << ", handle value is "
-             << (h ? "non-null" : "null") << endl);
+        DEBUG_MSG("DEBUG: handle stored, stored_handle pointer is %s, handle value is %s\n",
+             (stored_handle ? "non-null" : "null"),
+             (h ? "non-null" : "null"));
     }
     
     SharedFastqReader::ReadData await_resume() {
@@ -160,13 +222,13 @@ struct MoveStructure::query_pml_coroutine_return_type {
         suspend_always initial_suspend() { return {}; }
         suspend_always final_suspend() noexcept { return {}; }
         void unhandled_exception() {
-            DEBUG_MSG("DEBUG: Coroutine exception caught in unhandled_exception!" << endl);
+            DEBUG_MSG("DEBUG: Coroutine exception caught in unhandled_exception!\n");
             try {
                 throw;  // Re-throw to see what it is
             } catch (const std::exception& e) {
-                DEBUG_MSG("DEBUG: Exception type: std::exception, what(): " << e.what() << endl);
+                DEBUG_MSG("DEBUG: Exception type: std::exception, what(): %s\n", e.what());
             } catch (...) {
-                DEBUG_MSG("DEBUG: Exception type: unknown" << endl);
+                DEBUG_MSG("DEBUG: Exception type: unknown\n");
             }
             // For now, still swallow it to prevent crash, but we'll know it happened
         }
@@ -230,17 +292,18 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
     const bool use_separator = this->use_separator();
     const int sep_adjust = use_separator ? 1 : 0;
     
-    // Per-coroutine output buffer
-    std::ostringstream output_buffer;
+    // Per-coroutine output buffer (64KB should be enough for many lines)
+    static constexpr size_t OUTPUT_BUFFER_SIZE = 65536;
+    char output_buffer[OUTPUT_BUFFER_SIZE];
+    size_t buffer_pos = 0;
     int buffer_line_count = 0;
     
     while (true) {
-        DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " about to await next read" << endl);
+        DEBUG_MSG("DEBUG: Coroutine %d about to await next read\n", coroutine_id);
         // Request next read - this suspends until scheduler reads it
         auto read_data = co_await get_next_read(reader, my_handle_storage);
         
-        DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " resumed with read, valid=" 
-             << read_data.valid << endl);
+        DEBUG_MSG("DEBUG: Coroutine %d resumed with read, valid=%d\n", coroutine_id, read_data.valid ? 1 : 0);
         if (!read_data.valid) break;  // EOF
         
         read_count++;
@@ -262,7 +325,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         assert(offset < get_n(idx));
 
         while (roff > -1) {
-            DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " processing, roff=" << roff << endl);
+            DEBUG_MSG("DEBUG: Coroutine %d processing, roff=%d\n", coroutine_id, roff);
             char row_c_id = rlbwt[idx].get_c();
             char row_c = alphabet[row_c_id];
             if (!check_alphabet(R[roff])) {  // char doens't exist in reference
@@ -367,9 +430,9 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             }
             my_prefetch_r((void*)(&(rlbwt[0]) + new_idx));
             offset = get_offset(idx) + offset;
-            DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " about to co_yield (prefetch)" << endl);
+            DEBUG_MSG("DEBUG: Coroutine %d about to co_yield (prefetch)\n", coroutine_id);
             co_yield monostate{}; // wait for prefetch
-            DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " resumed after co_yield" << endl);
+            DEBUG_MSG("DEBUG: Coroutine %d resumed after co_yield\n", coroutine_id);
             uint16_t n = static_cast<uint16_t>(rlbwt[new_idx].n & (~mask_n)) - 1;
             if (new_idx < r - 1 && offset >= n) {
                 uint64_t niter = 0;
@@ -386,35 +449,59 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         }
         
         // Output results for this read - append to buffer
-        output_buffer << read_data.name << " ";
+        // Check if we need to flush before writing (leave some headroom)
+        if (buffer_pos > OUTPUT_BUFFER_SIZE - 2048) {
+            std::lock_guard<std::mutex> lock(output_mutex);
+            fwrite(output_buffer, 1, buffer_pos, stdout_buf);
+            fflush(stdout_buf);
+            buffer_pos = 0;
+            buffer_line_count = 0;
+        }
+        
+        // Write read name
+        size_t name_len = read_data.name.length();
+        if (buffer_pos + name_len + 1 <= OUTPUT_BUFFER_SIZE) {
+            std::memcpy(output_buffer + buffer_pos, read_data.name.c_str(), name_len);
+            buffer_pos += name_len;
+            output_buffer[buffer_pos++] = ' ';
+        }
+        
+        // Write matching lengths
         auto& matching_lengths = mq.get_matching_lengths();
         for (size_t i = 0; i < matching_lengths.size(); i++) {
-            output_buffer << matching_lengths[i];
-            if (i < matching_lengths.size() - 1) {
-                output_buffer << " ";
+            // Write integer digit by digit
+            size_t written = write_uint_to_buffer(output_buffer + buffer_pos, 
+                                                   OUTPUT_BUFFER_SIZE - buffer_pos, 
+                                                   matching_lengths[i]);
+            buffer_pos += written;
+            
+            if (i < matching_lengths.size() - 1 && buffer_pos < OUTPUT_BUFFER_SIZE) {
+                output_buffer[buffer_pos++] = ' ';
             }
         }
-        output_buffer << "\n";
+        
+        // Write newline
+        if (buffer_pos < OUTPUT_BUFFER_SIZE) {
+            output_buffer[buffer_pos++] = '\n';
+        }
         buffer_line_count++;
         
         // Flush when buffer reaches FLUSH_INTERVAL lines
         if (buffer_line_count >= FLUSH_INTERVAL) {
             std::lock_guard<std::mutex> lock(output_mutex);
-            cout << output_buffer.str();
-            cout.flush();
-            output_buffer.str("");  // Clear the buffer
-            output_buffer.clear();  // Clear error flags
+            fwrite(output_buffer, 1, buffer_pos, stdout_buf);
+            fflush(stdout_buf);
+            buffer_pos = 0;  // Clear the buffer
             buffer_line_count = 0;
         }
-        DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " finished processing read " 
-             << read_count << ", looping back" << endl);
+        DEBUG_MSG("DEBUG: Coroutine %d finished processing read %d, looping back\n", coroutine_id, read_count);
     }
     
     // Final flush of any remaining buffered output before returning
-    if (buffer_line_count > 0) {
+    if (buffer_pos > 0) {
         std::lock_guard<std::mutex> lock(output_mutex);
-        cout << output_buffer.str();
-        cout.flush();
+        fwrite(output_buffer, 1, buffer_pos, stdout_buf);
+        fflush(stdout_buf);
     }
     
     co_return;
@@ -428,9 +515,9 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     
     MoveStructure mv(&movi_options);
     mv.deserialize();
-    cerr << "Successfully loaded Movi index from: " << index_dir << endl;
+    fprintf(stderr_buf, "Successfully loaded Movi index from: %s\n", index_dir.c_str());
     
-    cout << "# Read_ID PML_Values" << endl;
+    fprintf(stdout_buf, "# Read_ID PML_Values\n");
     
     auto start_time = steady_clock::now();
     int64_t total_bases = 0;
@@ -464,13 +551,13 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
         
         for (int i = 0; i < concurrency; ++i) {
             if (coroutines[i].is_done()) {
-                DEBUG_MSG("DEBUG: Coroutine " << i << " is done" << endl);
+                DEBUG_MSG("DEBUG: Coroutine %d is done\n", i);
                 continue;
             }
             
             // Check if this coroutine is waiting for a read
             if (waiting_handles[i]) {
-                DEBUG_MSG("DEBUG: Scheduler detected waiting_handles[" << i << "] is set" << endl);
+                DEBUG_MSG("DEBUG: Scheduler detected waiting_handles[%d] is set\n", i);
                 total_reads_served++;
                 // Read next sequence and resume the coroutine
                 bool read_success = reader.read_next();
@@ -486,8 +573,7 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
                     }
                 } else {
                     // EOF - resume to let coroutine know there are no more reads
-                    DEBUG_MSG("DEBUG: EOF detected after serving " << total_reads_served 
-                         << " reads to coroutines" << endl);
+                    DEBUG_MSG("DEBUG: EOF detected after serving %d reads to coroutines\n", total_reads_served);
                     waiting_handles[i].resume();
                     waiting_handles[i] = nullptr;
                     if (!coroutines[i].is_done()) {
@@ -495,8 +581,8 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
                     }
                 }
             } else {
-                DEBUG_MSG("DEBUG: Scheduler iteration " << iteration << ", coroutine " << i 
-                     << " not waiting (handle is " << (waiting_handles[i] ? "set" : "null") << ")" << endl);
+                DEBUG_MSG("DEBUG: Scheduler iteration %d, coroutine %d not waiting (handle is %s)\n",
+                     iteration, i, (waiting_handles[i] ? "set" : "null"));
                 // Not waiting for read - just resume (handles co_yield for voluntary suspension)
                 if (coroutines[i].coro) {
                     coroutines[i].coro.resume();
@@ -508,8 +594,8 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
         }
     }
     
-    cerr << "Scheduler completed: " << iteration << " iterations, " 
-         << total_reads_served << " reads served to coroutines" << endl;
+    fprintf(stderr_buf, "Scheduler completed: %d iterations, %d reads served to coroutines\n", 
+            iteration, total_reads_served);
     
     // Calculate final statistics
     auto end_time = steady_clock::now();
@@ -522,23 +608,25 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
         nanoseconds_per_base = total_elapsed_ns / total_bases;
     }
     
-    cerr << "Completed processing (elapsed: " << std::fixed << std::setprecision(2)
-         << total_elapsed << " sec, " << std::setprecision(1) << nanoseconds_per_base
-         << " ns/base, bases=" << total_bases << ")" << endl;
+    fprintf(stderr_buf, "Completed processing (elapsed: %.2f sec, %.1f ns/base, bases=%ld)\n",
+            total_elapsed, nanoseconds_per_base, static_cast<long>(total_bases));
 }
 
 void print_usage(const char* program_name) {
-    cerr << "Usage: " << program_name << " [--debug] <fastq_file> <index_dir> [concurrency]" << endl;
-    cerr << "  --debug:     Enable debug output" << endl;
-    cerr << "  fastq_file: Input FASTQ file with reads" << endl;
-    cerr << "  index_dir:  Directory containing the Movi index" << endl;
-    cerr << "  concurrency: Number of concurrent coroutines (default: 1)" << endl;
-    cerr << endl;
-    cerr << "This program computes Pseudo Matching Lengths (PMLs) for reads" << endl;
-    cerr << "using a Movi regular-thresholds index (MODE=6)." << endl;
+    fprintf(stderr_buf, "Usage: %s [--debug] <fastq_file> <index_dir> [concurrency]\n", program_name);
+    fprintf(stderr_buf, "  --debug:     Enable debug output\n");
+    fprintf(stderr_buf, "  fastq_file: Input FASTQ file with reads\n");
+    fprintf(stderr_buf, "  index_dir:  Directory containing the Movi index\n");
+    fprintf(stderr_buf, "  concurrency: Number of concurrent coroutines (default: 1)\n");
+    fprintf(stderr_buf, "\n");
+    fprintf(stderr_buf, "This program computes Pseudo Matching Lengths (PMLs) for reads\n");
+    fprintf(stderr_buf, "using a Movi regular-thresholds index (MODE=6).\n");
 }
 
 int main(int argc, char* argv[]) {
+    // Initialize buffered I/O
+    init_buffered_io();
+    
     int arg_idx = 1;
     
     // Parse --debug flag if present
@@ -549,7 +637,7 @@ int main(int argc, char* argv[]) {
     
     // Check remaining arguments
     if (argc - arg_idx < 2 || argc - arg_idx > 3) {
-        cerr << "argc = " << argc << endl;
+        fprintf(stderr_buf, "argc = %d\n", argc);
         print_usage(argv[0]);
         return 1;
     }
@@ -561,11 +649,11 @@ int main(int argc, char* argv[]) {
         try {
             concurrency = std::stoi(argv[arg_idx + 2]);
             if (concurrency < 1) {
-                cerr << "Error: Concurrency must be at least 1" << endl;
+                fprintf(stderr_buf, "Error: Concurrency must be at least 1\n");
                 return 1;
             }
         } catch (const exception& e) {
-            cerr << "Error: Invalid concurrency value: " << argv[arg_idx + 2] << endl;
+            fprintf(stderr_buf, "Error: Invalid concurrency value: %s\n", argv[arg_idx + 2]);
             return 1;
         }
     }
@@ -573,9 +661,10 @@ int main(int argc, char* argv[]) {
     try {
         process_fastq(fastq_file, index_dir, concurrency);
     } catch (const exception& e) {
-        cerr << "Error: " << e.what() << endl;
+        fprintf(stderr_buf, "Error: %s\n", e.what());
         return 1;
     }
     return 0;
 }
+
 
