@@ -116,9 +116,9 @@ static size_t write_string_to_buffer(char* buffer, size_t buffer_size, const cha
 // DEBUG macro that only prints when NDEBUG is not defined and debug flag is set
 // Uses fprintf-style format strings
 #ifndef NDEBUG
-#define DEBUG_MSG(...) do { if (debug_enabled) { fprintf(stderr_buf, __VA_ARGS__); } } while(0)
+#define DEBUG_MSG_CO(...) do { if (debug_enabled) { fprintf(stderr_buf, __VA_ARGS__); } } while(0)
 #else
-#define DEBUG_MSG(...) ((void)0)
+#define DEBUG_MSG_CO(...) ((void)0)
 #endif
 
 // Mutex for thread-safe output from concurrent coroutines
@@ -163,10 +163,10 @@ public:
     // Read next sequence into pending_read
     bool read_next() {
         read_call_count++;
-        DEBUG_MSG("DEBUG: read_next() called (call #%d)\n", read_call_count);
+        DEBUG_MSG_CO("DEBUG: read_next() called (call #%d)\n", read_call_count);
         int l = kseq_read(seq);
         if (l < 0) {
-            DEBUG_MSG("DEBUG: kseq_read returned %d on call #%d\n", l, read_call_count);
+            DEBUG_MSG_CO("DEBUG: kseq_read returned %d on call #%d\n", l, read_call_count);
             // kseq_read returns:
             // -1: EOF
             // -2: truncated quality string  
@@ -174,7 +174,7 @@ public:
             pending_read.valid = false;
             return false;
         }
-        DEBUG_MSG("DEBUG: kseq_read returned length %d on call #%d\n", l, read_call_count);
+        DEBUG_MSG_CO("DEBUG: kseq_read returned length %d on call #%d\n", l, read_call_count);
         pending_read.valid = true;
         pending_read.name = string(seq->name.s);
         pending_read.sequence = string(seq->seq.s);
@@ -193,9 +193,9 @@ struct read_awaitable {
     
     template<typename Promise>
     void await_suspend(coroutine_handle<Promise> h) {
-        DEBUG_MSG("DEBUG: await_suspend storing handle for coroutine\n");
+        DEBUG_MSG_CO("DEBUG: await_suspend storing handle for coroutine\n");
         *stored_handle = h;
-        DEBUG_MSG("DEBUG: handle stored, stored_handle pointer is %s, handle value is %s\n",
+        DEBUG_MSG_CO("DEBUG: handle stored, stored_handle pointer is %s, handle value is %s\n",
              (stored_handle ? "non-null" : "null"),
              (h ? "non-null" : "null"));
     }
@@ -222,13 +222,13 @@ struct MoveStructure::query_pml_coroutine_return_type {
         suspend_always initial_suspend() { return {}; }
         suspend_always final_suspend() noexcept { return {}; }
         void unhandled_exception() {
-            DEBUG_MSG("DEBUG: Coroutine exception caught in unhandled_exception!\n");
+            DEBUG_MSG_CO("DEBUG: Coroutine exception caught in unhandled_exception!\n");
             try {
                 throw;  // Re-throw to see what it is
             } catch (const std::exception& e) {
-                DEBUG_MSG("DEBUG: Exception type: std::exception, what(): %s\n", e.what());
+                DEBUG_MSG_CO("DEBUG: Exception type: std::exception, what(): %s\n", e.what());
             } catch (...) {
-                DEBUG_MSG("DEBUG: Exception type: unknown\n");
+                DEBUG_MSG_CO("DEBUG: Exception type: unknown\n");
             }
             // For now, still swallow it to prevent crash, but we'll know it happened
         }
@@ -299,11 +299,11 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
     int buffer_line_count = 0;
     
     while (true) {
-        DEBUG_MSG("DEBUG: Coroutine %d about to await next read\n", coroutine_id);
+        DEBUG_MSG_CO("DEBUG: Coroutine %d about to await next read\n", coroutine_id);
         // Request next read - this suspends until scheduler reads it
         auto read_data = co_await get_next_read(reader, my_handle_storage);
         
-        DEBUG_MSG("DEBUG: Coroutine %d resumed with read, valid=%d\n", coroutine_id, read_data.valid ? 1 : 0);
+        DEBUG_MSG_CO("DEBUG: Coroutine %d resumed with read, valid=%d\n", coroutine_id, read_data.valid ? 1 : 0);
         if (!read_data.valid) break;  // EOF
         
         read_count++;
@@ -325,7 +325,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         assert(offset < get_n(idx));
 
         while (roff > -1) {
-            DEBUG_MSG("DEBUG: Coroutine %d processing, roff=%d\n", coroutine_id, roff);
+            DEBUG_MSG_CO("DEBUG: Coroutine %d processing, roff=%d\n", coroutine_id, roff);
             char row_c_id = rlbwt[idx].get_c();
             char row_c = alphabet[row_c_id];
             if (!check_alphabet(R[roff])) {  // char doens't exist in reference
@@ -430,9 +430,9 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             }
             my_prefetch_r((void*)(&(rlbwt[0]) + new_idx));
             offset = get_offset(idx) + offset;
-            DEBUG_MSG("DEBUG: Coroutine %d about to co_yield (prefetch)\n", coroutine_id);
+            DEBUG_MSG_CO("DEBUG: Coroutine %d about to co_yield (prefetch)\n", coroutine_id);
             co_yield monostate{}; // wait for prefetch
-            DEBUG_MSG("DEBUG: Coroutine %d resumed after co_yield\n", coroutine_id);
+            DEBUG_MSG_CO("DEBUG: Coroutine %d resumed after co_yield\n", coroutine_id);
             uint16_t n = static_cast<uint16_t>(rlbwt[new_idx].n & (~mask_n)) - 1;
             if (new_idx < r - 1 && offset >= n) {
                 uint64_t niter = 0;
@@ -494,7 +494,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             buffer_pos = 0;  // Clear the buffer
             buffer_line_count = 0;
         }
-        DEBUG_MSG("DEBUG: Coroutine %d finished processing read %d, looping back\n", coroutine_id, read_count);
+        DEBUG_MSG_CO("DEBUG: Coroutine %d finished processing read %d, looping back\n", coroutine_id, read_count);
     }
     
     // Final flush of any remaining buffered output before returning
@@ -551,13 +551,13 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
         
         for (int i = 0; i < concurrency; ++i) {
             if (coroutines[i].is_done()) {
-                DEBUG_MSG("DEBUG: Coroutine %d is done\n", i);
+                DEBUG_MSG_CO("DEBUG: Coroutine %d is done\n", i);
                 continue;
             }
             
             // Check if this coroutine is waiting for a read
             if (waiting_handles[i]) {
-                DEBUG_MSG("DEBUG: Scheduler detected waiting_handles[%d] is set\n", i);
+                DEBUG_MSG_CO("DEBUG: Scheduler detected waiting_handles[%d] is set\n", i);
                 total_reads_served++;
                 // Read next sequence and resume the coroutine
                 bool read_success = reader.read_next();
@@ -573,7 +573,7 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
                     }
                 } else {
                     // EOF - resume to let coroutine know there are no more reads
-                    DEBUG_MSG("DEBUG: EOF detected after serving %d reads to coroutines\n", total_reads_served);
+                    DEBUG_MSG_CO("DEBUG: EOF detected after serving %d reads to coroutines\n", total_reads_served);
                     waiting_handles[i].resume();
                     waiting_handles[i] = nullptr;
                     if (!coroutines[i].is_done()) {
@@ -581,7 +581,7 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
                     }
                 }
             } else {
-                DEBUG_MSG("DEBUG: Scheduler iteration %d, coroutine %d not waiting (handle is %s)\n",
+                DEBUG_MSG_CO("DEBUG: Scheduler iteration %d, coroutine %d not waiting (handle is %s)\n",
                      iteration, i, (waiting_handles[i] ? "set" : "null"));
                 // Not waiting for read - just resume (handles co_yield for voluntary suspension)
                 if (coroutines[i].coro) {
