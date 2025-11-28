@@ -257,6 +257,8 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         uint64_t ff_count_tot = 0, scan_count = 0;
         uint64_t offset = static_cast<uint16_t>(rlbwt[idx].n & (~mask_n)) - 1;
         const bool use_separator = this->use_separator();
+        assert(idx < rlbwt.size());
+        assert(offset < get_n(idx));
 
         while (roff > -1) {
             DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " processing, roff=" << roff << endl);
@@ -366,6 +368,8 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             }
             // At this point, if repositioning was needed it has been done
             // 'idx' and 'offset' are the new move-structure row index and offset
+            assert(offset < get_n(idx));
+            assert(idx < rlbwt.size());
             
             // Add matching length to query
             mq.add_ml(match_len, movi_options->is_stdout());
