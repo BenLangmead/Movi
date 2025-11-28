@@ -227,6 +227,8 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
     
     int read_count = 0;
     int64_t total_bases = 0;
+    const bool use_separator = this->use_separator();
+    const int sep_adjust = use_separator ? 1 : 0;
     
     // Per-coroutine output buffer
     std::ostringstream output_buffer;
@@ -256,13 +258,13 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         uint64_t match_len = 0;           // match length (consecurive case 1s) so far
         uint64_t ff_count_tot = 0, scan_count = 0;
         uint64_t offset = static_cast<uint16_t>(rlbwt[idx].n & (~mask_n)) - 1;
-        const bool use_separator = this->use_separator();
         assert(idx < rlbwt.size());
         assert(offset < get_n(idx));
 
         while (roff > -1) {
             DEBUG_MSG("DEBUG: Coroutine " << coroutine_id << " processing, roff=" << roff << endl);
-            char row_c = alphabet[rlbwt[idx].get_c()];
+            char row_c_id = rlbwt[idx].get_c();
+            char row_c = alphabet[row_c_id];
             if (!check_alphabet(R[roff])) {  // char doens't exist in reference
                 match_len = 0;
             } else if (row_c == R[roff]) {   // Case 1: Match
@@ -303,26 +305,15 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                     }
                 } else {
                     // Handle both separator and non-separator cases
-                    uint64_t r_ch_id_adj = r_ch_id;
-                    if (use_separator) {
-                        if (r_ch_id == 0) {
-                            throw std::runtime_error(ERROR_MSG("[query pml coroutine] the alphabet index equal to 0 should not happen with separators."));
-                        }
-                        r_ch_id_adj--;
-                    }
-                    
-                    char rlbwt_char = alphabet[rlbwt[idx].get_c()];
+                    assert(!use_separator || r_ch_id != 0);
+                    uint64_t r_ch_id_adj = r_ch_id - sep_adjust;
                     uint64_t threshold_value;
-                    if (use_separator && rlbwt_char == SEPARATOR) {
+                    if (use_separator && row_c == SEPARATOR) {
                         // Handle separator case - use separators_thresholds
                         threshold_value = separators_thresholds[separators_thresholds_map[idx]].values[r_ch_id];
                     } else {
                         // Regular case - use alphamap_3 (with or without separator adjustment)
-                        if (use_separator) {
-                            r_ch_id_adj = alphamap_3[alphamap[rlbwt_char] - 1][r_ch_id_adj];
-                        } else {
-                            r_ch_id_adj = alphamap_3[alphamap[rlbwt_char]][r_ch_id_adj];
-                        }
+                        r_ch_id_adj = alphamap_3[row_c_id - sep_adjust][r_ch_id_adj];
                         assert(r_ch_id_adj != 3);
                         threshold_value = get_thresholds(idx, r_ch_id_adj);
                     }
