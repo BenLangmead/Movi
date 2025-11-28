@@ -326,7 +326,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
 
         while (roff > -1) {
             DEBUG_MSG_CO("DEBUG: Coroutine %d processing, roff=%d\n", coroutine_id, roff);
-            char row_c_id = rlbwt[idx].get_c();
+            char row_c_id = static_cast<char>((rlbwt[idx].n & (~mask_c)) >> SHIFT_C);
             char row_c = alphabet[row_c_id];
             if (!check_alphabet(R[roff])) {  // char doens't exist in reference
                 match_len = 0;
@@ -343,11 +343,11 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                         if (saved_idx == 0) {
                             idx = r;
                         } else {
-                            char row_c_up_id = rlbwt[saved_idx].get_c();
+                            char row_c_up_id = static_cast<char>((rlbwt[saved_idx].n & (~mask_c)) >> SHIFT_C);
                             uint64_t repo_idx = saved_idx;
                             while (repo_idx > 0 && row_c_up_id != r_ch_id) {
                                 repo_idx--;
-                                row_c_up_id = rlbwt[repo_idx].get_c();
+                                row_c_up_id = static_cast<char>((rlbwt[repo_idx].n & (~mask_c)) >> SHIFT_C);
                             }
                             idx = (row_c_up_id == r_ch_id) ? repo_idx : r;
                         }
@@ -356,11 +356,11 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                         if (saved_idx == r - 1) {
                             idx = r;
                         } else {
-                            char row_c_dn_id = rlbwt[saved_idx].get_c();
+                            char row_c_dn_id = static_cast<char>((rlbwt[saved_idx].n & (~mask_c)) >> SHIFT_C);
                             uint64_t repo_idx = saved_idx;
                             while (repo_idx < r - 1 && row_c_dn_id != r_ch_id) {
                                 repo_idx++;
-                                row_c_dn_id = rlbwt[repo_idx].get_c();
+                                row_c_dn_id = static_cast<char>((rlbwt[repo_idx].n & (~mask_c)) >> SHIFT_C);
                             }
                             idx = (row_c_dn_id == r_ch_id) ? repo_idx : r;
                         }
@@ -382,20 +382,20 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                     }
                     
                     if (offset < threshold_value) {
-                        char row_c_up_id = rlbwt[saved_idx].get_c();
+                        char row_c_up_id = static_cast<char>((rlbwt[saved_idx].n & (~mask_c)) >> SHIFT_C);
                         uint64_t repo_idx = saved_idx;
                         while (repo_idx > 0 && row_c_up_id != r_ch_id) {
                             repo_idx--;
-                            row_c_up_id = rlbwt[repo_idx].get_c();
+                            row_c_up_id = static_cast<char>((rlbwt[repo_idx].n & (~mask_c)) >> SHIFT_C);
                         }
                         idx = (row_c_up_id == r_ch_id) ? repo_idx : r;
                         assert(idx < saved_idx);
                     } else {
-                        char row_c_dn_id = rlbwt[saved_idx].get_c();
+                        char row_c_dn_id = static_cast<char>((rlbwt[saved_idx].n & (~mask_c)) >> SHIFT_C);
                         uint64_t repo_idx = saved_idx;
                         while (repo_idx < r - 1 && row_c_dn_id != r_ch_id) {
                             repo_idx++;
-                            row_c_dn_id = rlbwt[repo_idx].get_c();
+                            row_c_dn_id = static_cast<char>((rlbwt[repo_idx].n & (~mask_c)) >> SHIFT_C);
                         }
                         idx = (row_c_dn_id == r_ch_id) ? repo_idx : r;
                         assert(idx > saved_idx);
