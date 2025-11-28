@@ -1,7 +1,7 @@
 # Movi Project Makefile
 # Provides convenient targets for building, testing, and development
 
-.PHONY: help build build-debug build-release build-profile clean dev dev-build
+.PHONY: help build build-debug build-release build-release-debug build-profile clean dev dev-build
 
 # Default target
 help:
