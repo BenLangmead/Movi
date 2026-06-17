@@ -254,11 +254,12 @@ uint64_t MoveStructure::query_kmers_from_bidirectional(MoveQuery& mq, int32_t& p
     return kmers_found;
 }
 
-uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single) {
+uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single, uint64_t* count_out) {
     size_t ftab_k = movi_options->get_ftab_k();
     size_t k = movi_options->get_k();
     auto& query_seq = mq.query();
     int32_t pos_on_r_saved = pos_on_r;
+    if (count_out) *count_out = 0;
 
     // An alternative strategy to look ahead for possible skipping
     // int32_t step = 0;
@@ -293,6 +294,7 @@ uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool 
         if (pos_on_r_saved - pos_on_r >= k - 1) {
             // At leat one kmer was found, update the postion and return the count
             uint64_t kmers_found = pos_on_r_saved - pos_on_r - k + 2;
+            if (count_out) *count_out = backward_search_result.count(rlbwt);
             #pragma omp atomic
             kmer_stats.positive_skipped += kmers_found - 1;
 
@@ -356,57 +358,16 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
             pos_on_r = pos_on_r - step - 1;
         } else {
             if (kmer_counts) {
-                // Let's get rid of the special case for count queries -- commented below for now
-                /* if (pos_on_r <= 2*k) {
-                    // The following searches every kmer beyond 2*k point separately isntead of the bidirectional search
-
-                    uint64_t kmers_found = query_kmers_from(mq, pos_on_r, true);
-                    #pragma omp atomic
-                    kmer_stats.positive_kmers += kmers_found;
-                    // kmer_stats.positive_kmers += query_kmers_from_bidirectional(mq, pos_on_r);
-                } else { */
-                    uint64_t kmers_found = query_kmers_from_bidirectional(mq, pos_on_r);
-                    #pragma omp atomic
-                    kmer_stats.positive_kmers += kmers_found;
-
-                    if (movi_options->is_debug()) {
-                        dbg.str("");
-                        dbg.clear();
-                        int pos_on_r_before = pos_on_r;
-                        int found_regular = 0;
-                        dbg << "regular backward search:\n";
-                        int k_m = pos_on_r - k/2;
-                        dbg << pos_on_r << "\t" << k_m << "\n";
-                        dbg << k/2 << "\n";
-                        for (int j = pos_on_r; j > k_m; j--) {
-                            dbg << " " << j << " ";
-                            if (j >= k)
-                                dbg << "\nkmer at " << j << ": " << query_seq.substr(j - k + 1, k) << " ";
-
-                            int pos = j;
-                            dbg << " pos:" << pos << " ";
-                            int z = query_kmers_from(mq, pos, true);
-                            if (z == 1 and pos == j - 1) {
-                                dbg << "1";
-                                found_regular += 1;
-                            } else
-                                dbg << "0";
-                        }
-                        dbg << "\n";
-                        dbg << "bidirectional search:\n";
-                        int pos = pos_on_r_before;
-                        int found_bidirectional = query_kmers_from_bidirectional(mq, pos);
-                        dbg << "\n";
-                        #pragma omp atomic
-                        kmer_stats.positive_kmers += found_bidirectional;
-                        if (found_regular != found_bidirectional) {
-                            DEBUG_MSG("pos_on_r_before:" + std::to_string(pos_on_r_before) + " pos_on_r:" + std::to_string(pos_on_r)
-                                            + " found_regular:" + std::to_string(found_regular)
-                                            + " found_bidirectional:" + std::to_string(found_bidirectional));
-                            DEBUG_MSG(dbg.str());
-                        }
-                    }
-                // }
+                // Correct per-kmer count: single-kmer backward search + BWT interval size.
+                // Reuses the validated presence search; needs no ftab and yields per-kmer counts.
+                int32_t kmer_end = pos_on_r;
+                uint64_t kmer_count = 0;
+                uint64_t found = query_kmers_from(mq, pos_on_r, true, &kmer_count);
+                mq.add_kmer(kmer_end - k + 1, kmer_count);
+                #pragma omp atomic
+                kmer_stats.positive_kmers += found;
+                #pragma omp atomic
+                kmer_stats.total_counts += kmer_count;
             } else {
                 uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r);
                 // Outputing the kmer matches only works for the non-count mode (for now)
