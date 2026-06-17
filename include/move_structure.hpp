@@ -171,7 +171,7 @@ class MoveStructure {
 /**********  Beginning of functions implemented in sequitur.cpp  ***********/
         void query_all_kmers(MoveQuery& mq, bool kmer_counts = false);
         uint64_t query_kmers_from_bidirectional(MoveQuery& mq, int32_t& pos_on_r);
-        uint64_t query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single = false);
+        uint64_t query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single = false, uint64_t* count_out = nullptr);
 /*******  End of functions implemented in sequitur.cpp  ***********/
 /***************************************************************************/
 
