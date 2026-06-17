@@ -48,6 +48,8 @@ using std::chrono::duration;
 static bool debug_enabled = false;
 // When set, write binary BPF output (like mainline Movi) instead of text.
 static bool g_bpf_output = false;
+// When false, disable the in-order reorder buffer (emit in completion order).
+static bool g_ordered_output = true;
 
 // Setup buffered stdout and stderr
 static FILE* stdout_buf = nullptr;
@@ -137,6 +139,7 @@ static constexpr int FLUSH_INTERVAL = 100;  // Flush every 100 lines
 static constexpr size_t OUTPUT_BUFFER_SIZE = 65536;
 struct OrderedEmitter {
     uint64_t next_emit = 0;
+    bool ordered = true;          // when false, write in completion order (no reorder)
     std::map<uint64_t, std::string> pending;  // completed lines awaiting their turn
     char buf[OUTPUT_BUFFER_SIZE];
     size_t pos = 0;
@@ -158,6 +161,7 @@ struct OrderedEmitter {
     // input order, then drains any consecutive buffered lines; otherwise buffers
     // a copy until the earlier reads complete.
     void emit(uint64_t seq, const std::string& line) {
+        if (!ordered) { write_line(line); return; }  // completion order (reorder disabled)
         if (seq == next_emit) {
             write_line(line);
             ++next_emit;
@@ -570,6 +574,7 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     } else {
         fprintf(stdout_buf, "# Read_ID PML_Values\n");
     }
+    g_emitter.ordered = g_ordered_output;
     
     auto start_time = steady_clock::now();
     int64_t total_bases = 0;
@@ -655,9 +660,10 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
 }
 
 void print_usage(const char* program_name) {
-    fprintf(stderr_buf, "Usage: %s [--debug] [--bpf] <fastq_file> <index_dir> [concurrency]\n", program_name);
+    fprintf(stderr_buf, "Usage: %s [--debug] [--bpf] [--unordered] <fastq_file> <index_dir> [concurrency]\n", program_name);
     fprintf(stderr_buf, "  --debug:     Enable debug output\n");
     fprintf(stderr_buf, "  --bpf:       Write binary BPF output (like mainline Movi) instead of text\n");
+    fprintf(stderr_buf, "  --unordered: Emit reads in completion order (disable the in-order reorder buffer)\n");
     fprintf(stderr_buf, "  fastq_file: Input FASTQ file with reads\n");
     fprintf(stderr_buf, "  index_dir:  Directory containing the Movi index\n");
     fprintf(stderr_buf, "  concurrency: Number of concurrent coroutines (default: 1)\n");
@@ -677,6 +683,7 @@ int main(int argc, char* argv[]) {
         string flag = argv[arg_idx];
         if (flag == "--debug") { debug_enabled = true; }
         else if (flag == "--bpf") { g_bpf_output = true; }
+        else if (flag == "--unordered") { g_ordered_output = false; }
         else { fprintf(stderr_buf, "Unknown flag: %s\n", flag.c_str()); print_usage(argv[0]); return 1; }
         arg_idx++;
     }
