@@ -127,23 +127,48 @@ static std::mutex output_mutex;
 // Flush interval for periodic flushing
 static constexpr int FLUSH_INTERVAL = 100;  // Flush every 100 lines
 
-// Shared reader that manages single gzFile and kseq_t
+// Shared reader that parses FASTQ/A records in batches and hands them to
+// coroutines through per-coroutine slots. The hot path neither parses one
+// record at a time nor copies each read: the scheduler moves a record from the
+// current batch into the awaiting coroutine's slot, and the coroutine uses it
+// in place (zero per-read copy). Single-threaded -- no background I/O thread --
+// so the query still runs on exactly one CPU.
 class SharedFastqReader {
 public:
     struct ReadData {
-        bool valid;
+        bool valid = false;
         string name;
         string sequence;
     };
-    
+
 private:
     gzFile fp;
     kseq_t* seq;
-    ReadData pending_read;
-    int read_call_count = 0;  // Add this
-    
+    std::vector<ReadData> batch;   // current batch of parsed records
+    size_t batch_pos = 0;          // next unserved record within batch
+    std::vector<ReadData> slots;   // one slot per coroutine (zero-copy handoff)
+    static constexpr size_t BATCH_N = 256;
+
+    // Parse up to BATCH_N records in a tight loop. This amortizes the kseq
+    // parse / gzip-decompression call overhead and keeps it off the per-read
+    // critical path (one refill stall every BATCH_N reads instead of a parse
+    // interleaved with every read's compute).
+    void refill() {
+        batch.clear();
+        batch_pos = 0;
+        for (size_t k = 0; k < BATCH_N; k++) {
+            int l = kseq_read(seq);
+            if (l < 0) break;  // EOF (-1) or error (-2/-3)
+            ReadData rd;
+            rd.valid = true;
+            rd.name.assign(seq->name.s, seq->name.l);
+            rd.sequence.assign(seq->seq.s, seq->seq.l);
+            batch.push_back(std::move(rd));
+        }
+    }
+
 public:
-    SharedFastqReader(const string& fastq_file) : fp(nullptr), seq(nullptr) {
+    SharedFastqReader(const string& fastq_file, int concurrency) : fp(nullptr), seq(nullptr) {
         fp = gzopen(fastq_file.c_str(), "r");
         if (!fp) {
             throw std::runtime_error("Cannot open FASTQ file: " + fastq_file);
@@ -153,64 +178,48 @@ public:
             gzclose(fp);
             throw std::runtime_error("Cannot initialize kseq");
         }
+        slots.resize(concurrency);
     }
-    
+
     ~SharedFastqReader() {
         if (seq) kseq_destroy(seq);
         if (fp) gzclose(fp);
     }
-    
-    // Read next sequence into pending_read
-    bool read_next() {
-        read_call_count++;
-        DEBUG_MSG_CO("DEBUG: read_next() called (call #%d)\n", read_call_count);
-        int l = kseq_read(seq);
-        if (l < 0) {
-            DEBUG_MSG_CO("DEBUG: kseq_read returned %d on call #%d\n", l, read_call_count);
-            // kseq_read returns:
-            // -1: EOF
-            // -2: truncated quality string  
-            // -3: error reading stream
-            pending_read.valid = false;
-            return false;
-        }
-        DEBUG_MSG_CO("DEBUG: kseq_read returned length %d on call #%d\n", l, read_call_count);
-        pending_read.valid = true;
-        pending_read.name = string(seq->name.s);
-        pending_read.sequence = string(seq->seq.s);
+
+    // Move the next record into coroutine id's slot. Returns false at EOF
+    // (the slot is marked invalid).
+    bool serve_next(int id) {
+        if (batch_pos >= batch.size()) refill();
+        if (batch_pos >= batch.size()) { slots[id].valid = false; return false; }
+        slots[id] = std::move(batch[batch_pos++]);
         return true;
     }
-    
-    const ReadData& get_pending_read() const { return pending_read; }
+
+    ReadData& slot(int id) { return slots[id]; }
 };
 
-// Awaitable for requesting a read from the shared reader
+// Awaitable: suspends the coroutine until the scheduler serves a read into this
+// coroutine's slot, then hands back a reference to that slot (no copy).
 struct read_awaitable {
     SharedFastqReader* reader;
     coroutine_handle<>* stored_handle;  // Where to store the coroutine handle
-    
+    int coroutine_id;
+
     bool await_ready() const noexcept { return false; }
-    
+
     template<typename Promise>
     void await_suspend(coroutine_handle<Promise> h) {
-        DEBUG_MSG_CO("DEBUG: await_suspend storing handle for coroutine\n");
         *stored_handle = h;
-        DEBUG_MSG_CO("DEBUG: handle stored, stored_handle pointer is %s, handle value is %s\n",
-             (stored_handle ? "non-null" : "null"),
-             (h ? "non-null" : "null"));
     }
-    
-    SharedFastqReader::ReadData await_resume() {
-        return reader->get_pending_read();
+
+    SharedFastqReader::ReadData& await_resume() {
+        return reader->slot(coroutine_id);
     }
 };
 
 // Helper to create awaitable
-read_awaitable get_next_read(SharedFastqReader& reader, coroutine_handle<>& handle_storage) {
-    read_awaitable awaiter;
-    awaiter.reader = &reader;
-    awaiter.stored_handle = &handle_storage;
-    return awaiter;
+read_awaitable get_next_read(SharedFastqReader& reader, coroutine_handle<>& handle_storage, int coroutine_id) {
+    return read_awaitable{&reader, &handle_storage, coroutine_id};
 }
 
 // Coroutine return type for query_pml_coroutine
@@ -307,7 +316,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
     while (true) {
         DEBUG_MSG_CO("DEBUG: Coroutine %d about to await next read\n", coroutine_id);
         // Request next read - this suspends until scheduler reads it
-        auto read_data = co_await get_next_read(reader, my_handle_storage);
+        auto& read_data = co_await get_next_read(reader, my_handle_storage, coroutine_id);
         
         DEBUG_MSG_CO("DEBUG: Coroutine %d resumed with read, valid=%d\n", coroutine_id, read_data.valid ? 1 : 0);
         if (!read_data.valid) break;  // EOF
@@ -515,7 +524,7 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     int64_t total_bases = 0;
     
     // Single shared reader for all coroutines
-    SharedFastqReader reader(fastq_file);
+    SharedFastqReader reader(fastq_file, concurrency);
     
     // Storage for coroutine handles waiting for reads
     std::vector<coroutine_handle<>> waiting_handles(concurrency);
@@ -549,28 +558,15 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
             
             // Check if this coroutine is waiting for a read
             if (waiting_handles[i]) {
-                DEBUG_MSG_CO("DEBUG: Scheduler detected waiting_handles[%d] is set\n", i);
                 total_reads_served++;
-                // Read next sequence and resume the coroutine
-                bool read_success = reader.read_next();
-                if (read_success) {
-                    // Track total bases processed
-                    const auto& read_data = reader.get_pending_read();
-                    total_bases += read_data.sequence.length();
-                    
-                    waiting_handles[i].resume();
-                    waiting_handles[i] = nullptr;  // Clear the handle
-                    if (!coroutines[i].is_done()) {
-                        active_coroutines++;
-                    }
-                } else {
-                    // EOF - resume to let coroutine know there are no more reads
-                    DEBUG_MSG_CO("DEBUG: EOF detected after serving %d reads to coroutines\n", total_reads_served);
-                    waiting_handles[i].resume();
-                    waiting_handles[i] = nullptr;
-                    if (!coroutines[i].is_done()) {
-                        active_coroutines++;
-                    }
+                // Move the next batched record into this coroutine's slot.
+                if (reader.serve_next(i)) {
+                    total_bases += reader.slot(i).sequence.length();
+                }
+                waiting_handles[i].resume();
+                waiting_handles[i] = nullptr;
+                if (!coroutines[i].is_done()) {
+                    active_coroutines++;
                 }
             } else {
                 DEBUG_MSG_CO("DEBUG: Scheduler iteration %d, coroutine %d not waiting (handle is %s)\n",
