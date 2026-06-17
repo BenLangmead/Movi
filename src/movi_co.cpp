@@ -297,7 +297,13 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
     char output_buffer[OUTPUT_BUFFER_SIZE];
     size_t buffer_pos = 0;
     int buffer_line_count = 0;
-    
+
+    // Per-coroutine work buffers reused across reads (cleared, not reallocated,
+    // each read) so there is no per-read heap churn.
+    std::vector<uint16_t> matching_lens;
+    std::string out_line;
+    char numbuf[24];
+
     while (true) {
         DEBUG_MSG_CO("DEBUG: Coroutine %d about to await next read\n", coroutine_id);
         // Request next read - this suspends until scheduler reads it
@@ -310,12 +316,12 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         int read_bases = read_data.sequence.length();
         total_bases += read_bases;
         
-        // Process the read
-        string query_seq = read_data.sequence;
-        std::reverse(query_seq.begin(), query_seq.end());
-        MoveQuery mq(query_seq);
-
-        auto& R = mq.query();
+        // Process the read in place: reverse this coroutine's own copy of the
+        // sequence and use it directly as the query (no extra copies, no
+        // per-read MoveQuery allocation).
+        std::string& R = read_data.sequence;
+        std::reverse(R.begin(), R.end());
+        matching_lens.clear();
         int32_t roff = R.length() - 1;    // offset in read
         uint64_t idx = r - 1;             // row index
         uint64_t match_len = 0;           // match length (consecurive case 1s) so far
@@ -413,8 +419,10 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             assert(offset < get_n(idx));
             assert(idx < rlbwt.size());
             
-            // Add matching length to query
-            mq.add_ml(match_len, movi_options->is_stdout());
+            // Record the PML (clamped to uint16_t), reusing the vector capacity.
+            matching_lens.push_back(match_len > numeric_limits<uint16_t>::max()
+                                    ? numeric_limits<uint16_t>::max()
+                                    : static_cast<uint16_t>(match_len));
             roff--; // move left by 1 on query
             
             // Begin LF step.  Start by computing index of next row id where this
@@ -449,37 +457,34 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             idx = new_idx;
         }
         
-        // Output results for this read.
-        // Build the full line locally so arbitrarily long reads can never
-        // overflow/truncate the shared buffer (the previous fixed-buffer logic
-        // dropped values and newlines on long reads, corrupting output).
-        auto& matching_lengths = mq.get_matching_lengths();
-        std::string line;
-        line.reserve(read_data.name.size() + matching_lengths.size() * 3 + 2);
-        line.append(read_data.name);
-        line.push_back(' ');
-        char numbuf[24];
-        for (size_t i = 0; i < matching_lengths.size(); i++) {
-            size_t w = write_uint_to_buffer(numbuf, sizeof(numbuf), matching_lengths[i]);
-            line.append(numbuf, w);
-            if (i + 1 < matching_lengths.size()) line.push_back(' ');
+        // Output results for this read into the reused line buffer (cleared
+        // each read so capacity is retained). Building the whole line first
+        // means arbitrarily long reads can never overflow/truncate the shared
+        // buffer.
+        out_line.clear();
+        out_line.append(read_data.name);
+        out_line.push_back(' ');
+        for (size_t i = 0; i < matching_lens.size(); i++) {
+            size_t w = write_uint_to_buffer(numbuf, sizeof(numbuf), matching_lens[i]);
+            out_line.append(numbuf, w);
+            if (i + 1 < matching_lens.size()) out_line.push_back(' ');
         }
-        line.push_back('\n');
+        out_line.push_back('\n');
 
         // Emit: flush the shared buffer if the line wouldn't fit; write
         // oversized lines directly so nothing is ever truncated.
-        if (line.size() > OUTPUT_BUFFER_SIZE) {
+        if (out_line.size() > OUTPUT_BUFFER_SIZE) {
             std::lock_guard<std::mutex> lock(output_mutex);
             if (buffer_pos > 0) { fwrite(output_buffer, 1, buffer_pos, stdout_buf); buffer_pos = 0; }
-            fwrite(line.data(), 1, line.size(), stdout_buf);
+            fwrite(out_line.data(), 1, out_line.size(), stdout_buf);
         } else {
-            if (buffer_pos + line.size() > OUTPUT_BUFFER_SIZE) {
+            if (buffer_pos + out_line.size() > OUTPUT_BUFFER_SIZE) {
                 std::lock_guard<std::mutex> lock(output_mutex);
                 fwrite(output_buffer, 1, buffer_pos, stdout_buf);
                 buffer_pos = 0;
             }
-            std::memcpy(output_buffer + buffer_pos, line.data(), line.size());
-            buffer_pos += line.size();
+            std::memcpy(output_buffer + buffer_pos, out_line.data(), out_line.size());
+            buffer_pos += out_line.size();
         }
         DEBUG_MSG_CO("DEBUG: Coroutine %d finished processing read %d, looping back\n", coroutine_id, read_count);
     }
