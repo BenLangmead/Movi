@@ -449,51 +449,37 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             idx = new_idx;
         }
         
-        // Output results for this read - append to buffer
-        // Check if we need to flush before writing (leave some headroom)
-        if (buffer_pos > OUTPUT_BUFFER_SIZE - 2048) {
-            std::lock_guard<std::mutex> lock(output_mutex);
-            fwrite(output_buffer, 1, buffer_pos, stdout_buf);
-            fflush(stdout_buf);
-            buffer_pos = 0;
-            buffer_line_count = 0;
-        }
-        
-        // Write read name
-        size_t name_len = read_data.name.length();
-        if (buffer_pos + name_len + 1 <= OUTPUT_BUFFER_SIZE) {
-            std::memcpy(output_buffer + buffer_pos, read_data.name.c_str(), name_len);
-            buffer_pos += name_len;
-            output_buffer[buffer_pos++] = ' ';
-        }
-        
-        // Write matching lengths
+        // Output results for this read.
+        // Build the full line locally so arbitrarily long reads can never
+        // overflow/truncate the shared buffer (the previous fixed-buffer logic
+        // dropped values and newlines on long reads, corrupting output).
         auto& matching_lengths = mq.get_matching_lengths();
+        std::string line;
+        line.reserve(read_data.name.size() + matching_lengths.size() * 3 + 2);
+        line.append(read_data.name);
+        line.push_back(' ');
+        char numbuf[24];
         for (size_t i = 0; i < matching_lengths.size(); i++) {
-            // Write integer digit by digit
-            size_t written = write_uint_to_buffer(output_buffer + buffer_pos, 
-                                                   OUTPUT_BUFFER_SIZE - buffer_pos, 
-                                                   matching_lengths[i]);
-            buffer_pos += written;
-            
-            if (i < matching_lengths.size() - 1 && buffer_pos < OUTPUT_BUFFER_SIZE) {
-                output_buffer[buffer_pos++] = ' ';
-            }
+            size_t w = write_uint_to_buffer(numbuf, sizeof(numbuf), matching_lengths[i]);
+            line.append(numbuf, w);
+            if (i + 1 < matching_lengths.size()) line.push_back(' ');
         }
-        
-        // Write newline
-        if (buffer_pos < OUTPUT_BUFFER_SIZE) {
-            output_buffer[buffer_pos++] = '\n';
-        }
-        buffer_line_count++;
-        
-        // Flush when buffer reaches FLUSH_INTERVAL lines
-        if (buffer_line_count >= FLUSH_INTERVAL) {
+        line.push_back('\n');
+
+        // Emit: flush the shared buffer if the line wouldn't fit; write
+        // oversized lines directly so nothing is ever truncated.
+        if (line.size() > OUTPUT_BUFFER_SIZE) {
             std::lock_guard<std::mutex> lock(output_mutex);
-            fwrite(output_buffer, 1, buffer_pos, stdout_buf);
-            fflush(stdout_buf);
-            buffer_pos = 0;  // Clear the buffer
-            buffer_line_count = 0;
+            if (buffer_pos > 0) { fwrite(output_buffer, 1, buffer_pos, stdout_buf); buffer_pos = 0; }
+            fwrite(line.data(), 1, line.size(), stdout_buf);
+        } else {
+            if (buffer_pos + line.size() > OUTPUT_BUFFER_SIZE) {
+                std::lock_guard<std::mutex> lock(output_mutex);
+                fwrite(output_buffer, 1, buffer_pos, stdout_buf);
+                buffer_pos = 0;
+            }
+            std::memcpy(output_buffer + buffer_pos, line.data(), line.size());
+            buffer_pos += line.size();
         }
         DEBUG_MSG_CO("DEBUG: Coroutine %d finished processing read %d, looping back\n", coroutine_id, read_count);
     }
