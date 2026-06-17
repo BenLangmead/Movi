@@ -46,6 +46,8 @@ using std::chrono::duration;
 
 // Global debug flag
 static bool debug_enabled = false;
+// When set, write binary BPF output (like mainline Movi) instead of text.
+static bool g_bpf_output = false;
 
 // Setup buffered stdout and stderr
 static FILE* stdout_buf = nullptr;
@@ -520,18 +522,30 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         // means arbitrarily long reads can never overflow/truncate the shared
         // buffer.
         out_line.clear();
-        out_line.append(read_data.name);
-        out_line.push_back(' ');
-        for (size_t i = 0; i < matching_lens.size(); i++) {
-            size_t w = write_uint_to_buffer(numbuf, sizeof(numbuf), matching_lens[i]);
-            out_line.append(numbuf, w);
-            if (i + 1 < matching_lens.size()) out_line.push_back(' ');
+        if (g_bpf_output) {
+            // Binary BPF record, byte-compatible with mainline Movi's
+            // output_base_stats: uint16 name length, name bytes, uint64 count,
+            // then the raw uint16 matching-length array.
+            uint16_t name_len = static_cast<uint16_t>(read_data.name.size());
+            out_line.append(reinterpret_cast<const char*>(&name_len), sizeof(name_len));
+            out_line.append(read_data.name);
+            uint64_t cnt = matching_lens.size();
+            out_line.append(reinterpret_cast<const char*>(&cnt), sizeof(cnt));
+            if (cnt) out_line.append(reinterpret_cast<const char*>(matching_lens.data()), cnt * sizeof(uint16_t));
+        } else {
+            out_line.append(read_data.name);
+            out_line.push_back(' ');
+            for (size_t i = 0; i < matching_lens.size(); i++) {
+                size_t w = write_uint_to_buffer(numbuf, sizeof(numbuf), matching_lens[i]);
+                out_line.append(numbuf, w);
+                if (i + 1 < matching_lens.size()) out_line.push_back(' ');
+            }
+            out_line.push_back('\n');
         }
-        out_line.push_back('\n');
 
-        // Hand the completed line to the in-order emitter: it writes now if this
-        // is the next read in input order, otherwise buffers a copy until the
-        // earlier reads finish. (out_line is reused across reads.)
+        // Hand the completed record to the in-order emitter: it writes now if
+        // this is the next read in input order, otherwise buffers a copy until
+        // the earlier reads finish. (out_line is reused across reads.)
         g_emitter.emit(read_data.seq, out_line);
         DEBUG_MSG_CO("DEBUG: Coroutine %d finished processing read %d, looping back\n", coroutine_id, read_count);
     }
@@ -549,7 +563,13 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     mv.deserialize();
     fprintf(stderr_buf, "Successfully loaded Movi index from: %s\n", index_dir.c_str());
     
-    fprintf(stdout_buf, "# Read_ID PML_Values\n");
+    if (g_bpf_output) {
+        BPFHeader header;
+        header.init(16);  // matching lengths are stored as 16-bit values
+        fwrite(&header, sizeof(header), 1, stdout_buf);
+    } else {
+        fprintf(stdout_buf, "# Read_ID PML_Values\n");
+    }
     
     auto start_time = steady_clock::now();
     int64_t total_bases = 0;
@@ -635,8 +655,9 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
 }
 
 void print_usage(const char* program_name) {
-    fprintf(stderr_buf, "Usage: %s [--debug] <fastq_file> <index_dir> [concurrency]\n", program_name);
+    fprintf(stderr_buf, "Usage: %s [--debug] [--bpf] <fastq_file> <index_dir> [concurrency]\n", program_name);
     fprintf(stderr_buf, "  --debug:     Enable debug output\n");
+    fprintf(stderr_buf, "  --bpf:       Write binary BPF output (like mainline Movi) instead of text\n");
     fprintf(stderr_buf, "  fastq_file: Input FASTQ file with reads\n");
     fprintf(stderr_buf, "  index_dir:  Directory containing the Movi index\n");
     fprintf(stderr_buf, "  concurrency: Number of concurrent coroutines (default: 1)\n");
@@ -650,10 +671,13 @@ int main(int argc, char* argv[]) {
     init_buffered_io();
     
     int arg_idx = 1;
-    
-    // Parse --debug flag if present
-    if (argc > 1 && string(argv[arg_idx]) == "--debug") {
-        debug_enabled = true;
+
+    // Parse leading flags (--debug, --bpf) in any order.
+    while (arg_idx < argc && string(argv[arg_idx]).rfind("--", 0) == 0) {
+        string flag = argv[arg_idx];
+        if (flag == "--debug") { debug_enabled = true; }
+        else if (flag == "--bpf") { g_bpf_output = true; }
+        else { fprintf(stderr_buf, "Unknown flag: %s\n", flag.c_str()); print_usage(argv[0]); return 1; }
         arg_idx++;
     }
     
