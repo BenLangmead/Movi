@@ -320,7 +320,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         uint64_t idx = r - 1;             // row index
         uint64_t match_len = 0;           // match length (consecurive case 1s) so far
         uint64_t ff_count_tot = 0, scan_count = 0;
-        uint64_t offset = static_cast<uint16_t>(rlbwt[idx].n & (~mask_n)) - 1;
+        uint64_t offset = get_n(idx) - 1;
         assert(idx < rlbwt.size());
         assert(offset < get_n(idx));
 
@@ -373,7 +373,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                     uint64_t threshold_value;
                     if (use_separator && row_c == SEPARATOR) {
                         // Handle separator case - use separators_thresholds
-                        threshold_value = separators_thresholds[separators_thresholds_map[idx]].values[r_ch_id];
+                        threshold_value = separators_thresholds[separators_thresholds_map[idx]].values[r_ch_id_adj];
                     } else {
                         // Regular case - use alphamap_3 (with or without separator adjustment)
                         r_ch_id_adj = alphamap_3[row_c_id - sep_adjust][r_ch_id_adj];
@@ -382,6 +382,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                     }
                     
                     if (offset < threshold_value) {
+                        up = true;
                         char row_c_up_id = static_cast<char>((rlbwt[saved_idx].n & (~mask_c)) >> SHIFT_C);
                         uint64_t repo_idx = saved_idx;
                         while (repo_idx > 0 && row_c_up_id != r_ch_id) {
@@ -405,7 +406,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
                 assert(idx < r);
                 assert(idx < rlbwt.size());
                 assert(alphabet[rlbwt[idx].get_c()] == R[roff] && "Repositioning failed - character mismatch");
-                offset = up ? (static_cast<uint16_t>(rlbwt[idx].n & (~mask_n)) - 1) : 0;
+                offset = up ? (get_n(idx) - 1) : 0;
             }
             // At this point, if repositioning was needed it has been done
             // 'idx' and 'offset' are the new move-structure row index and offset
@@ -433,14 +434,14 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             DEBUG_MSG_CO("DEBUG: Coroutine %d about to co_yield (prefetch)\n", coroutine_id);
             co_yield monostate{}; // wait for prefetch
             DEBUG_MSG_CO("DEBUG: Coroutine %d resumed after co_yield\n", coroutine_id);
-            uint16_t n = static_cast<uint16_t>(rlbwt[new_idx].n & (~mask_n)) - 1;
+            uint64_t n = get_n(new_idx);
             if (new_idx < r - 1 && offset >= n) {
                 uint64_t niter = 0;
                 while (new_idx < r - 1 && offset >= n) {
                     offset -= n;
                     niter++;
                     new_idx++;
-                    n = static_cast<uint16_t>(rlbwt[new_idx].n & (~mask_n)) - 1;
+                    n = get_n(new_idx);
                 }
                 assert(niter < numeric_limits<uint16_t>::max());
                 ff_count_tot += static_cast<uint16_t>(niter);
