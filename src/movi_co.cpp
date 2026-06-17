@@ -51,6 +51,10 @@ static bool g_bpf_output = false;
 // When true (--reorder), emit reads in input order via the reorder buffer;
 // default is completion order (lower overhead, matches mainline Movi's order).
 static bool g_ordered_output = false;
+// MEM query mode (movi-co also supports --mem) and its parameters.
+static bool g_mem_query = false;
+static int  g_ftab_k = 0;
+static int  g_min_mem_length = 0;
 
 // Setup buffered stdout and stderr
 static FILE* stdout_buf = nullptr;
@@ -559,21 +563,149 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
 }
 
 
+// Coroutine MEM query with latency hiding. Mirrors MoveStructure::query_mems /
+// query_mem_bml (min_mem_length > 1 path) and reuses the shared bidirectional
+// primitives unchanged; the only additions are prefetch + co_yield before each
+// extension step so the scheduler overlaps the memory latency across reads.
+// (MEM is processed left-to-right; the read is NOT reversed.)
+MoveStructure::query_pml_coroutine_return_type MoveStructure::query_mem_coroutine(
+    SharedFastqReader& reader,
+    coroutine_handle<>& my_handle_storage,
+    int coroutine_id) {
+
+    const int32_t min_mem_length = movi_options->get_min_mem_length();
+    const size_t  ftab_k = movi_options->get_ftab_k();
+    char numbuf[24];
+    std::string out_line;
+
+    // Prefetch the rlbwt rows an interval's next step will first touch.
+    auto pf = [&](MoveInterval& iv) {
+        my_prefetch_r((void*)(&(rlbwt[0]) + iv.run_start));
+        my_prefetch_r((void*)(&(rlbwt[0]) + iv.run_end));
+    };
+
+    while (true) {
+        auto& read_data = co_await get_next_read(reader, my_handle_storage, coroutine_id);
+        if (!read_data.valid) break;
+
+        // Take ownership of the sequence (cheap move) so the shared primitives,
+        // which take a MoveQuery&, can be reused directly.
+        MoveQuery mq(std::move(read_data.sequence));
+        mq.set_query_id(read_data.name);
+        std::string& query_seq = mq.query();
+        const int32_t qlen = static_cast<int32_t>(query_seq.length());
+
+        int32_t pos_on_r = 0;
+        while (pos_on_r < qlen) {
+            // ---- query_mem_bml(pos_on_r) inlined with prefetch + co_yield ----
+            if (pos_on_r + min_mem_length > qlen) { pos_on_r = qlen; break; }
+
+            uint64_t match_len = 0;
+            int32_t init_pos = pos_on_r + min_mem_length - 1;
+            MoveBiInterval bi_interval = initialize_bidirectional_search(mq, init_pos, match_len);
+            bool ftab_skip = match_len <= 1 && ftab_k <= static_cast<size_t>(min_mem_length);
+            --init_pos;
+
+            bool failed = false;
+            if (ftab_skip) {
+                MoveInterval fw_interval = bi_interval.fw_interval;
+                for (size_t j = 0; j <= static_cast<size_t>(init_pos - pos_on_r); ++j) {
+                    pf(fw_interval); co_yield monostate{};
+                    if (!backward_search_step(query_seq[init_pos - j], fw_interval)) {
+                        pos_on_r = init_pos - j + 1; failed = true; break;
+                    }
+                    ++match_len;
+                }
+                if (!failed) throw std::runtime_error("Extended past failed ftab");
+            } else {
+                for (size_t j = 0; j <= static_cast<size_t>(init_pos - pos_on_r); ++j) {
+                    pf(bi_interval.fw_interval); pf(bi_interval.rc_interval); co_yield monostate{};
+                    if (!extend_left(query_seq[init_pos - j], bi_interval)) {
+                        pos_on_r = init_pos - j + 1; failed = true; break;
+                    }
+                    ++match_len;
+                }
+            }
+            if (failed) continue;  // no MEM at this start; pos_on_r advanced
+
+            // Forward extension to find right end of MEM (exclusive).
+            MoveInterval rc_interval = bi_interval.rc_interval;
+            MoveInterval rc_interval_before_extension = rc_interval;
+            size_t i;
+            for (i = pos_on_r + min_mem_length; i < static_cast<size_t>(qlen); ++i) {
+                rc_interval_before_extension = rc_interval;
+                pf(rc_interval); co_yield monostate{};
+                if (!forward_search_step(query_seq[i], rc_interval)) {
+                    rc_interval = rc_interval_before_extension; break;
+                }
+                ++match_len;
+            }
+
+            mq.add_mem(pos_on_r, i, rc_interval.count(rlbwt));
+
+            // Backward extension to find the next candidate MEM's left end.
+            size_t end_pos_on_r = i;
+            if (end_pos_on_r < static_cast<size_t>(qlen)) {
+                init_pos = static_cast<int32_t>(end_pos_on_r);
+                match_len = 0;
+                MoveInterval fw_interval = initialize_backward_search(mq, init_pos, match_len);
+                ++match_len;
+                --init_pos;
+                for (i = 0; i <= static_cast<size_t>(init_pos - (pos_on_r + 1)); ++i) {
+                    pf(fw_interval); co_yield monostate{};
+                    if (!backward_search_step(query_seq[init_pos - i], fw_interval)) break;
+                    ++match_len;
+                }
+            } else {
+                i = 0;
+            }
+            pos_on_r = (init_pos - static_cast<int32_t>(i)) + 1;
+        }
+
+        // Emit this read's MEMs (id \t start \t end \t count), one per line.
+        out_line.clear();
+        for (auto& m : mq.get_mems()) {
+            out_line.append(mq.get_query_id());
+            out_line.push_back('\t');
+            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.start));
+            out_line.push_back('\t');
+            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.end));
+            out_line.push_back('\t');
+            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.count));
+            out_line.push_back('\n');
+        }
+        g_emitter.emit(read_data.seq, out_line);
+    }
+    co_return;
+}
+
+
 void process_fastq(const string& fastq_file, const string& index_dir, int concurrency) {
     MoviOptions movi_options;
     movi_options.set_index_dir(index_dir);
-    movi_options.set_pml(); // Enable PML mode
-    
+    if (g_mem_query) {
+        movi_options.set_mem();
+        movi_options.set_ftab_k(static_cast<uint32_t>(g_ftab_k));
+        movi_options.set_min_mem_length(static_cast<uint32_t>(g_min_mem_length));
+        movi_options.set_multi_ftab(false);
+    } else {
+        movi_options.set_pml(); // Enable PML mode
+    }
+
     MoveStructure mv(&movi_options);
     mv.deserialize();
+    if (g_mem_query && g_ftab_k > 0) mv.read_ftab();
     fprintf(stderr_buf, "Successfully loaded Movi index from: %s\n", index_dir.c_str());
-    
-    if (g_bpf_output) {
-        BPFHeader header;
-        header.init(16);  // matching lengths are stored as 16-bit values
-        fwrite(&header, sizeof(header), 1, stdout_buf);
-    } else {
-        fprintf(stdout_buf, "# Read_ID PML_Values\n");
+
+    // PML/text/BPF header only applies to the PML output; MEM emits tab-delimited lines.
+    if (!g_mem_query) {
+        if (g_bpf_output) {
+            BPFHeader header;
+            header.init(16);  // matching lengths are stored as 16-bit values
+            fwrite(&header, sizeof(header), 1, stdout_buf);
+        } else {
+            fprintf(stdout_buf, "# Read_ID PML_Values\n");
+        }
     }
     g_emitter.ordered = g_ordered_output;
     
@@ -590,9 +722,11 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     
     // Initialize all coroutines - use move semantics
     for (int i = 0; i < concurrency; ++i) {
-        coroutines.push_back(std::move(mv.query_pml_coroutine(reader, waiting_handles[i], i)));
-        // Resume coroutines initially to get them started
-        // They start suspended, so we need to resume them to begin execution
+        if (g_mem_query)
+            coroutines.push_back(std::move(mv.query_mem_coroutine(reader, waiting_handles[i], i)));
+        else
+            coroutines.push_back(std::move(mv.query_pml_coroutine(reader, waiting_handles[i], i)));
+        // They start suspended, so resume to begin execution.
         if (coroutines[i].coro) {
             coroutines[i].coro.resume();
         }
@@ -685,6 +819,9 @@ int main(int argc, char* argv[]) {
         if (flag == "--debug") { debug_enabled = true; }
         else if (flag == "--bpf") { g_bpf_output = true; }
         else if (flag == "--reorder") { g_ordered_output = true; }
+        else if (flag == "--mem") { g_mem_query = true; }
+        else if (flag == "--ftab-k") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_ftab_k = std::stoi(argv[++arg_idx]); }
+        else if (flag == "--min-mem-length") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_min_mem_length = std::stoi(argv[++arg_idx]); }
         else { fprintf(stderr_buf, "Unknown flag: %s\n", flag.c_str()); print_usage(argv[0]); return 1; }
         arg_idx++;
     }

@@ -157,10 +157,17 @@ class MoveStructure {
         // C++20 coroutine version of query_pml
         struct query_pml_coroutine_return_type;
         query_pml_coroutine_return_type query_pml_coroutine(
-            SharedFastqReader& reader, 
+            SharedFastqReader& reader,
             std::coroutine_handle<>& my_handle_storage,
             int coroutine_id);
-        
+
+        // C++20 coroutine version of the (bidirectional) MEM query; reuses the
+        // same return type and scheduler scaffolding as the PML coroutine.
+        query_pml_coroutine_return_type query_mem_coroutine(
+            SharedFastqReader& reader,
+            std::coroutine_handle<>& my_handle_storage,
+            int coroutine_id);
+
 
         uint64_t reposition_up(uint64_t idx, char c, uint64_t& scan_count);
         uint64_t reposition_down(uint64_t idx, char c, uint64_t& scan_count);
