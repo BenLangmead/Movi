@@ -168,6 +168,13 @@ class MoveStructure {
             std::coroutine_handle<>& my_handle_storage,
             int coroutine_id);
 
+        // C++20 coroutine version of the k-mer query (--kmer / --kmer-count);
+        // reuses the same return type and scheduler scaffolding.
+        query_pml_coroutine_return_type query_kmer_coroutine(
+            SharedFastqReader& reader,
+            std::coroutine_handle<>& my_handle_storage,
+            int coroutine_id);
+
 
         uint64_t reposition_up(uint64_t idx, char c, uint64_t& scan_count);
         uint64_t reposition_down(uint64_t idx, char c, uint64_t& scan_count);
