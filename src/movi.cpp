@@ -80,7 +80,7 @@ void handle_kmer(MoveQuery& mq, MoviOptions& movi_options,
                  MoveStructure& mv_, OutputFiles& output_files) {
     mv_.query_all_kmers(mq, movi_options.is_kmer_count());
 
-    if (!movi_options.is_kmer_count()) {
+    {
         if (movi_options.write_output_allowed()) {
             #pragma omp critical
             {
