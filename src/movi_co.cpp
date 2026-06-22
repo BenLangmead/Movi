@@ -78,6 +78,7 @@ static int  g_min_mem_length = 0;
 // k-mer query mode (movi-co also supports --kmer / --kmer-count) and its length.
 static bool g_kmer_query = false;
 static bool g_kmer_count = false;
+static bool g_kmer_bv = false;   // use the count bitvector (pred/succ) for counts
 static int  g_k = 0;
 
 // Setup buffered stdout and stderr
@@ -951,6 +952,36 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_kmer_corouti
                         }
                     } while (match_len == 0 && pos_on_r >= k - 1 && ftab_k > 1);
 
+                    if (count_mode && movi_options->is_kmer_bv()) {
+                        // ---- keep-going count via the bitvector (W1+W2; inlined
+                        // query_kmers_count_bv). Walk left at presence speed; at every
+                        // position whose covered match is >= k, resolve the leftmost
+                        // k-mer's count from the count bitvector. The shrinking interval
+                        // is always a subset of that k-mer's group, so pred(lb)/succ(rb)
+                        // give its exact count. The LF step is the same prefetch+co_yield
+                        // point as presence; the pred/succ probe rides the same pipeline.
+                        const int32_t anchor = pos_saved;
+                        if (init_iv.is_empty()) {
+                            pos_on_r = pos_saved - 1;
+                        } else {
+                            MoveInterval iv = init_iv;
+                            uint64_t kmers_found = 0;
+                            while (true) {
+                                if (anchor - pos_on_r + 1 >= k) {
+                                    uint64_t cnt = kmer_count_from_bv(iv);
+                                    mq.add_kmer(pos_on_r, /*present=*/1,
+                                                std::numeric_limits<uint64_t>::max(), cnt);
+                                    kmers_found += 1;
+                                }
+                                if (pos_on_r <= 0) break;
+                                if (!step_prep(iv, query_seq[pos_on_r - 1])) break;
+                                co_yield monostate{};
+                                step_finish(iv);
+                                pos_on_r -= 1;
+                            }
+                            pos_on_r = (kmers_found > 0) ? (pos_on_r + k - 2) : (pos_saved - 1);
+                        }
+                    } else {
                     const int32_t bs_max = count_mode
                         ? (k - static_cast<int32_t>(match_len) - 2)
                         : std::numeric_limits<int32_t>::max();
@@ -981,9 +1012,13 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_kmer_corouti
                     }
 
                     if (count_mode) {
-                        mq.add_kmer(kmer_end - k + 1, kc);
+                        // present=1 per k-mer keeps the found/all header correct;
+                        // kc is the displayed multiplicity.
+                        mq.add_kmer(kmer_end - k + 1, /*present=*/1,
+                                    std::numeric_limits<uint64_t>::max(), kc);
                     } else {
                         mq.add_kmer(pos_on_r + 2 - k, found);
+                    }
                     }
                 }
 
@@ -1018,6 +1053,7 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     } else if (g_kmer_query) {
         movi_options.set_kmer();
         movi_options.set_kmer_count(g_kmer_count);
+        movi_options.set_kmer_bv(g_kmer_bv);
         movi_options.set_k(static_cast<uint32_t>(g_k));
         movi_options.set_ftab_k(static_cast<uint32_t>(g_ftab_k));
         movi_options.set_multi_ftab(false);
@@ -1028,6 +1064,9 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     MoveStructure mv(&movi_options);
     mv.deserialize();
     if ((g_mem_query && g_ftab_k > 0) || (g_kmer_query && g_ftab_k > 1)) mv.read_ftab();
+    // Run-local k-mer count structure (and the MPHF id bitvector): only needed for
+    // the --kmer-bv path; loaded once after the move structure.
+    if (g_kmer_query && g_kmer_bv) mv.load_kmerbv(static_cast<uint32_t>(g_k));
     fprintf(stderr_buf, "Successfully loaded Movi index from: %s\n", index_dir.c_str());
 
     // PML/text/BPF header only applies to the PML output; MEM and k-mer emit
@@ -1171,6 +1210,7 @@ int main(int argc, char* argv[]) {
         else if (flag == "--mem") { g_mem_query = true; }
         else if (flag == "--kmer") { g_kmer_query = true; }
         else if (flag == "--kmer-count") { g_kmer_query = true; g_kmer_count = true; }
+        else if (flag == "--kmer-bv") { g_kmer_bv = true; }
         else if (flag == "-k" || flag == "--k-length") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_k = std::stoi(argv[++arg_idx]); }
         else if (flag == "--ftab-k") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_ftab_k = std::stoi(argv[++arg_idx]); }
         else if (flag == "--min-mem-length") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_min_mem_length = std::stoi(argv[++arg_idx]); }
