@@ -1,7 +1,14 @@
-# release
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
-# debug:
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+# Set compiler flags based on build type
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
+elseif(CMAKE_BUILD_TYPE STREQUAL "Profile")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pg -O2 -gdwarf-4 -fno-omit-frame-pointer")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pg")
+elseif(CMAKE_BUILD_TYPE STREQUAL "ReleaseDebug")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -fno-omit-frame-pointer")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
+endif()
 
 # compile with address sanitizer
 # add_compile_options(-fsanitize=address)
@@ -44,6 +51,7 @@ target_compile_definitions(movi_lib_test PRIVATE MODE=0 COLOR_MODE=0)
 
 
 add_executable(movi movi_launcher.cpp commons.cpp)
+target_link_libraries(movi zlibstatic)
 
 # Main executables with their specific MODE configurations
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -94,3 +102,9 @@ target_compile_options(movi-sampled PUBLIC -DMODE=5 -DCOLOR_MODE=0)
 add_executable(movi-sampled-thresholds ${MOVI_MAIN_SOURCES})
 target_link_libraries(movi-sampled-thresholds sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
 target_compile_options(movi-sampled-thresholds PUBLIC -DMODE=7 -DCOLOR_MODE=0)
+add_executable(movi-co movi_co.cpp ${MOVI_SOURCES})
+target_link_libraries(movi-co sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
+target_compile_options(movi-co PUBLIC -DMODE=6 -DCOLOR_MODE=0)
+if(CMAKE_BUILD_TYPE STREQUAL "Profile")
+    target_compile_definitions(movi-co PRIVATE ENABLE_GPROF)
+endif()
