@@ -4,7 +4,7 @@
 // Movi runs each hot query in up to three styles; this file is style (c):
 //   (a) sequential, no latency hiding:
 //         move_structure_query.cpp (query_pml/query_zml/query_all_kmers),
-//         mem_finder.cpp (query_mems/query_mem_bml).
+//         query_mem.cpp (query_mems/query_mem_bml).
 //   (b) manual "strand" state machine: prefetch, then hand-switch among
 //         in-flight reads at each prefetch point:
 //         read_processor.cpp (process_latency_hiding, kmer_search_latency_hiding),

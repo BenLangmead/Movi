@@ -27,7 +27,7 @@ set(MOVI_SOURCES
     read_processor.cpp
     utils.cpp
     query_kmer.cpp
-    mem_finder.cpp
+    query_mem.cpp
     emperical_null_database.cpp
     movi_parser.cpp
     classifier.cpp
