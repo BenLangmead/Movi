@@ -195,7 +195,8 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
     all_actions.push_back("build-kmerbv");
     auto buildKmerBvOptions = options.add_options("build-kmerbv")
         ("i,index", "Index directory [REQUIRED]", cxxopts::value<std::string>())
-        ("kmer-lengths", "K-mer length(s) for bitvector construction [REQUIRED, repeatable]", cxxopts::value<std::vector<uint32_t>>());
+        ("kmer-lengths", "K-mer length(s) for bitvector construction [REQUIRED, repeatable]", cxxopts::value<std::vector<uint32_t>>())
+        ("canonical", "Assign one dense id per CANONICAL k-mer (SSHash-compatible: ids in [0,num_kmers)); without it, ids are per-orientation");
 
     all_actions.push_back("color");
     auto colorOptions = options.add_options("color")
@@ -334,6 +335,7 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
                 if (result.count("index") == 1 and result.count("kmer-lengths") >= 1) {
                     movi_options.set_index_dir(result["index"].as<std::string>());
                     movi_options.set_build_kmerbv_ks(result["kmer-lengths"].as<std::vector<uint32_t>>());
+                    if (result.count("canonical") >= 1) { movi_options.set_kmerbv_canonical(true); }
                 } else {
                     const std::string message = "Please specify --index and at least one --kmer-lengths value.";
                     cxxopts::throw_or_mimic<cxxopts::exceptions::invalid_option_format>(message);

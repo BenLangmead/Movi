@@ -88,6 +88,8 @@ class MoviOptions {
 
         std::vector<uint32_t> get_build_kmerbv_ks() { return build_kmerbv_ks; }
         void set_build_kmerbv_ks(std::vector<uint32_t> ks) { build_kmerbv_ks = ks; }
+        bool is_kmerbv_canonical() { return kmerbv_canonical; }
+        void set_kmerbv_canonical(bool val) { kmerbv_canonical = val; }
 
         std::string get_ref_file() { return ref_file; }
         std::string get_bwt_file() { return bwt_file; }
@@ -259,6 +261,7 @@ class MoviOptions {
         bool kmer_bv = false;
         bool mem_query = false;
         std::vector<uint32_t> build_kmerbv_ks;
+        bool kmerbv_canonical = false;
         bool reverse = false;
         bool mmap = false;
         bool prefetch = true;

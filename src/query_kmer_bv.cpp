@@ -2,6 +2,7 @@
 
 #include <stack>
 #include <unordered_map>
+#include <fstream>
 
 void MoveStructure::rebuild_all_p_if_needed() {
     if (!all_p.empty()) return;
@@ -58,7 +59,29 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
 
     // The four ACGT characters (the '%' separator and sentinel are excluded:
     // real k-mers never span them).
+    // bases[] is in A<C<G<T order, so its index doubles as the 2-bit code; the
+    // complement of code x is 3-x (A<->T, C<->G).
     const char bases[4] = {'A', 'C', 'G', 'T'};
+
+    // Canonical-id mode (SSHash-compatible): mark the dense-id bitvector B_k only
+    // at canonical k-mers (s == min(s, rc(s))), so rank(lb) is a dense id in
+    // [0, #canonical k-mers) matching SSHash's num_kmers. The count bitvector C_k
+    // is ALWAYS marked for every real k-mer: counting is orientation-agnostic (a
+    // query searches the literal k-mer and reads its interval size = the canonical
+    // count occ(x)+occ(rc(x))), so the non-canonical orientation's interval must
+    // still be resolvable.
+    const bool canonical = movi_options->is_kmerbv_canonical();
+
+    // 2-bit k-mer packed as it is grown left-to-right down the DFS: each
+    // left-extension prepends the new (text-leftmost) base into a higher 2-bit
+    // group. group j (bits [2j,2j+2)) holds the (j+1)-th base added, i.e. text
+    // position depth-1-j, so the integer value orders lexicographically by the
+    // real text and `packed <= rc(packed)` tests canonicality. k<=63 fits 126 bits.
+    auto kmer_rc = [](unsigned __int128 x, uint32_t d) -> unsigned __int128 {
+        unsigned __int128 r = 0;
+        for (uint32_t i = 0; i < d; ++i) { r = (r << 2) | (3u - (unsigned)(x & 3u)); x >>= 2; }
+        return r;
+    };
 
     auto set_bit = [](sdsl::bit_vector* bv, uint64_t pos) {
         // Atomic OR: different threads may touch the same 64-bit word (e.g. one
@@ -66,16 +89,17 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
         // read-modify-write must be atomic; setting the same bit twice is fine.
         __atomic_fetch_or(&bv->data()[pos >> 6], 1ULL << (pos & 63ULL), __ATOMIC_RELAXED);
     };
-    auto mark = [&](uint32_t depth, const MoveInterval& iv) {
+    auto mark = [&](uint32_t depth, const MoveInterval& iv, unsigned __int128 packed) {
         if (bv_at[depth] == nullptr) return;
         uint64_t lb = all_p[iv.run_start] + iv.offset_start;
         uint64_t rb = all_p[iv.run_end] + iv.offset_end;
-        set_bit(bv_at[depth], lb);          // dense-id bitvector: lb only
+        if (!canonical || packed <= kmer_rc(packed, depth))
+            set_bit(bv_at[depth], lb);      // dense-id bitvector: lb only (canonical k-mers)
         set_bit(cbv_at[depth], lb);         // count bitvector: lb ...
-        set_bit(cbv_at[depth], rb + 1);     //              ... and rb+1
+        set_bit(cbv_at[depth], rb + 1);     //              ... and rb+1 (every real k-mer)
     };
 
-    struct Node { MoveInterval interval; uint32_t depth; };
+    struct Node { MoveInterval interval; uint32_t depth; unsigned __int128 packed; };
 
     // ------------------------------------------------------------------ //
     // Phase 1 (serial): DFS down to `seed_depth`, marking every requested k
@@ -84,28 +108,31 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
     // at most 4^seed_depth distinct prefixes).
     // ------------------------------------------------------------------ //
     const uint32_t seed_depth = std::min<uint32_t>(max_k, 6);
-    std::vector<MoveInterval> seeds;
+    struct Seed { MoveInterval interval; unsigned __int128 packed; };
+    std::vector<Seed> seeds;
     {
         std::stack<Node> stk;
-        for (char c : bases) {
+        for (int i = 0; i < 4; ++i) {
+            char c = bases[i];
             if (!check_alphabet(c)) continue;
             uint64_t ci = alphamap[static_cast<uint64_t>(c)] + 1;
             MoveInterval iv(first_runs[ci], first_offsets[ci], last_runs[ci], last_offsets[ci]);
             if (iv.is_empty()) continue;
-            stk.push({iv, 1});
+            stk.push({iv, 1, (unsigned __int128)i});  // group 0 = first (rightmost) base
         }
         while (!stk.empty()) {
             Node node = stk.top();
             stk.pop();
             if (node.depth == seed_depth) {
-                seeds.push_back(node.interval);  // marked in the parallel phase
+                seeds.push_back({node.interval, node.packed});  // marked in the parallel phase
                 continue;
             }
-            mark(node.depth, node.interval);
-            for (char c : bases) {
+            mark(node.depth, node.interval, node.packed);
+            for (int i = 0; i < 4; ++i) {
                 MoveInterval child = node.interval;
-                if (backward_search_step(c, child))  // prepend c (left-extend)
-                    stk.push({child, node.depth + 1});
+                if (backward_search_step(bases[i], child))  // prepend base (left-extend)
+                    stk.push({child, node.depth + 1,
+                              node.packed | ((unsigned __int128)i << (2 * node.depth))});
             }
         }
     }
@@ -121,16 +148,17 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
     #pragma omp parallel for schedule(dynamic)
     for (size_t s = 0; s < seeds.size(); ++s) {
         std::stack<Node> stk;
-        stk.push({seeds[s], seed_depth});
+        stk.push({seeds[s].interval, seed_depth, seeds[s].packed});
         while (!stk.empty()) {
             Node node = stk.top();
             stk.pop();
-            mark(node.depth, node.interval);
+            mark(node.depth, node.interval, node.packed);
             if (node.depth == max_k) continue;
-            for (char c : bases) {
+            for (int i = 0; i < 4; ++i) {
                 MoveInterval child = node.interval;
-                if (backward_search_step(c, child))
-                    stk.push({child, node.depth + 1});
+                if (backward_search_step(bases[i], child))
+                    stk.push({child, node.depth + 1,
+                              node.packed | ((unsigned __int128)i << (2 * node.depth))});
             }
         }
     }
@@ -198,9 +226,16 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
         for (size_t i = 0; i < gimark_vec.size(); ++i) if (gimark_vec[i]) gimark[i] = 1;
         sdsl::store_to_file(gimark, index_dir + "/kmerbv." + ks_ + ".cnt.gimark");
 
-        INFO_MSG("k=" + ks_ + ": " + std::to_string(ones) +
-                 " distinct k-mers; bitvectors written to " + index_dir +
-                 "/kmerbv." + ks_ + ".{bv,cnt.*}");
+        // Sidecar metadata so the query / access side knows the id space:
+        //   line 1: canonical flag (0|1);  line 2: num_kmers (= ones).
+        {
+            std::ofstream meta(index_dir + "/kmerbv." + ks_ + ".meta");
+            meta << (canonical ? 1 : 0) << "\n" << ones << "\n";
+        }
+
+        INFO_MSG("k=" + ks_ + ": num_kmers=" + std::to_string(ones) + " distinct " +
+                 (canonical ? "CANONICAL " : "") + "k-mers; bitvectors written to " +
+                 index_dir + "/kmerbv." + ks_ + ".{bv,cnt.*,meta}");
     }
 }
 
