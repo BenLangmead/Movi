@@ -425,6 +425,21 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         assert(idx < rlbwt.size());
         assert(offset < get_n(idx));
 
+        // NOTE: the PML inner loop below is intentionally an INLINE reimplementation
+        // of the repositioning and the LF/fast-forward step, rather than calls to the
+        // shared reposition_thresholds / get_id / LF_move primitives (the way the MEM
+        // and k-mer coroutines reuse them). A reuse version was written and measured
+        // byte-identical but materially slower, and that was confirmed on a dedicated
+        // c5.metal box (7 reps, tight): at W=8 the hand-inlined loop is ~109 ns/base
+        // vs ~130 for the primitive-reusing version (~19%). PML's per-step work is so
+        // small that once latency hiding is engaged, the un-inlined/un-fused primitive
+        // calls dominate. LTO (which inlined LF_move) and even __attribute__((flatten))
+        // on this function (which force-inlines the whole reposition chain) recovered
+        // only ~5 ns of the ~21 ns gap (~126 ns/base) -- the rest is structural, not
+        // just un-inlined calls. So the inline form is kept deliberately; it was
+        // corrected to match the engine exactly (the four bugs noted in the foundation
+        // commit). If you edit it, re-validate byte-for-byte against production
+        // query_pml (--pml --reverse).
         while (roff > -1) {
             DEBUG_MSG_CO("DEBUG: Coroutine %d processing, roff=%d\n", coroutine_id, roff);
             char row_c_id = static_cast<char>((rlbwt[idx].n & (~mask_c)) >> SHIFT_C);
