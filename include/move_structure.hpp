@@ -30,7 +30,7 @@
 #include "move_row.hpp"
 #include "move_row_colored.hpp"
 #include "move_query.hpp"
-#include "sequitur.hpp"
+#include "query_kmer.hpp"
 #include "mem_finder.hpp"
 #include "utils.hpp"
 #include "move_intervals.hpp"
@@ -192,13 +192,13 @@ class MoveStructure {
 /***************************************************************************/
 
 /***************************************************************************/
-/**********  Beginning of functions implemented in sequitur.cpp  ***********/
+/**********  Beginning of functions implemented in query_kmer.cpp  ***********/
         void query_all_kmers(MoveQuery& mq, bool kmer_counts = false);
         uint64_t query_kmers_from_bidirectional(MoveQuery& mq, int32_t& pos_on_r);
         uint64_t query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single = false,
                                   MoveInterval* interval_out = nullptr);
         uint64_t query_kmers_count_bv(MoveQuery& mq, int32_t& pos_on_r);
-/*******  End of functions implemented in sequitur.cpp  ***********/
+/*******  End of functions implemented in query_kmer.cpp  ***********/
 /***************************************************************************/
 
 /***************************************************************************/
