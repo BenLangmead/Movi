@@ -140,8 +140,8 @@ demand for `access`).
 
 ## Status / plan
 
-- [ ] `build-kmerbv --canonical`: track k-mer string in DFS, mark canonical only; store `num_kmers`, mode sidecar.
-- [ ] `lookup`: query-time canonicalization + orientation in the `--kmer-bv` path.
-- [ ] `num_kmers` / `print-info`.
+- [x] `build-kmerbv --canonical`: 2-bit packed k-mer carried down the DFS, mark `B_k` only when `packed <= rc(packed)`; `kmerbv.<k>.meta` sidecar (canonical flag + num_kmers). **Validated: ecoli10 k=31 num_kmers=15,209,176 == KMC unique exactly; non-canonical = 2× (no odd-k palindromes).** (commit `a500502`)
+- [ ] `lookup`: query-time canonicalization + orientation in the `--kmer-bv` path (REQUIRED before canonical ids are queryable — a non-canonical query k-mer's lb is unmarked in canonical mode).
+- [ ] `num_kmers` / `print-info` accessor (read from `.meta`).
 - [ ] `access`: `select` over `B_k` + forward reconstruction; `access-kmer` CLI.
-- [ ] extend the bijection test to canonical mode; cross-check `num_kmers` vs SSHash.
+- [ ] extend the bijection test to canonical mode; cross-check `num_kmers` vs an SSHash `--canonical` index.
