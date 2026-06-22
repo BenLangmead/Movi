@@ -21,6 +21,7 @@ set(MOVI_SOURCES
     move_structure_search.cpp
     move_structure_query.cpp
     move_structure_color.cpp
+    move_structure_kmerbv.cpp
     move_row.cpp
     move_row_colored.cpp
     read_processor.cpp
@@ -102,6 +103,7 @@ target_compile_options(movi-sampled PUBLIC -DMODE=5 -DCOLOR_MODE=0)
 add_executable(movi-sampled-thresholds ${MOVI_MAIN_SOURCES})
 target_link_libraries(movi-sampled-thresholds sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
 target_compile_options(movi-sampled-thresholds PUBLIC -DMODE=7 -DCOLOR_MODE=0)
+
 add_executable(movi-co movi_co.cpp ${MOVI_SOURCES})
 target_link_libraries(movi-co sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
 target_compile_options(movi-co PUBLIC -DMODE=6 -DCOLOR_MODE=0)

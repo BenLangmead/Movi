@@ -80,12 +80,13 @@ void handle_kmer(MoveQuery& mq, MoviOptions& movi_options,
                  MoveStructure& mv_, OutputFiles& output_files) {
     mv_.query_all_kmers(mq, movi_options.is_kmer_count());
 
-    {
-        if (movi_options.write_output_allowed()) {
-            #pragma omp critical
-            {
-                output_kmers(movi_options.write_stdout_enabled(), output_files.kmer_file, mq.query().length() - movi_options.get_k() + 1, mq);
-            }
+    // Emit per-k-mer output in both presence and count modes.  (Count mode now
+    // populates the same per-k-mer string via add_kmer, so it is no longer
+    // suppressed here.)
+    if (movi_options.write_output_allowed()) {
+        #pragma omp critical
+        {
+            output_kmers(movi_options.write_stdout_enabled(), output_files.kmer_file, mq.query().length() - movi_options.get_k() + 1, mq);
         }
     }
 }
@@ -655,6 +656,11 @@ int main(int argc, char** argv) {
             mv_.find_sampled_SA_entries();
             mv_.serialize_sampled_SA();
             SUCCESS_MSG("Successfully stored sampled SA entries at " + movi_options.get_index_dir());
+        } else if (command == "build-kmerbv") {
+            MoveStructure mv_(&movi_options);
+            mv_.deserialize();
+            mv_.build_kmerbv(movi_options.get_build_kmerbv_ks());
+            SUCCESS_MSG("Successfully built k-mer bitvector(s) at " + movi_options.get_index_dir());
         } else if (command == "color") {
             MoveStructure mv_(&movi_options);
             auto begin = std::chrono::system_clock::now();
@@ -684,6 +690,14 @@ int main(int argc, char** argv) {
                 end = std::chrono::system_clock::now();
                 elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
                 TIMING_MSG(elapsed, "loading the sampled SA entries");
+            }
+
+            if (movi_options.is_kmer_bv()) {
+                begin = std::chrono::system_clock::now();
+                mv_.load_kmerbv(movi_options.get_k());
+                end = std::chrono::system_clock::now();
+                elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
+                TIMING_MSG(elapsed, "loading the k-mer bitvector");
             }
 
             if (movi_options.is_multi_classify()) {

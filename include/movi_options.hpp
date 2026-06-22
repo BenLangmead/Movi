@@ -43,6 +43,7 @@ class MoviOptions {
         bool is_count() { return count_query; }
         bool is_kmer() { return kmer_query; }
         bool is_kmer_count() { return kmer_count; }
+        bool is_kmer_bv() { return kmer_bv; }
         bool is_mem() { return mem_query; }
         bool is_reverse() { return reverse; }
         bool is_multi_ftab() { return multi_ftab; }
@@ -85,6 +86,9 @@ class MoviOptions {
         std::string get_command() { return command; }
         std::string get_LF_type() { return LF_type; }
 
+        std::vector<uint32_t> get_build_kmerbv_ks() { return build_kmerbv_ks; }
+        void set_build_kmerbv_ks(std::vector<uint32_t> ks) { build_kmerbv_ks = ks; }
+
         std::string get_ref_file() { return ref_file; }
         std::string get_bwt_file() { return bwt_file; }
         std::string get_read_file() { return read_file; }
@@ -115,6 +119,7 @@ class MoviOptions {
         void set_kmer()  { kmer_query = true; pml_query = false; count_query = false; zml_query = false; mem_query = false; }
         void set_mem() { mem_query = true; pml_query = false; count_query = false; kmer_query = false; zml_query = false; }
         void set_kmer_count(bool kmer_count_) { kmer_count = kmer_count_; }
+        void set_kmer_bv(bool val) { kmer_bv = val; }
         void set_k(uint32_t k_) { k = k_; }
         void set_min_mem_length(uint32_t min_mem_length_) { min_mem_length = min_mem_length_; }
         void set_ftab_k(uint32_t ftab_k_) { ftab_k = ftab_k_; }
@@ -251,7 +256,9 @@ class MoviOptions {
         bool count_query = false;
         bool kmer_query = false;
         bool kmer_count = false;
+        bool kmer_bv = false;
         bool mem_query = false;
+        std::vector<uint32_t> build_kmerbv_ks;
         bool reverse = false;
         bool mmap = false;
         bool prefetch = true;

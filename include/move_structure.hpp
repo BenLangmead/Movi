@@ -195,7 +195,8 @@ class MoveStructure {
 /**********  Beginning of functions implemented in sequitur.cpp  ***********/
         void query_all_kmers(MoveQuery& mq, bool kmer_counts = false);
         uint64_t query_kmers_from_bidirectional(MoveQuery& mq, int32_t& pos_on_r);
-        uint64_t query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single = false, MoveInterval* interval_out = nullptr);
+        uint64_t query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single = false,
+                                  MoveInterval* interval_out = nullptr);
 /*******  End of functions implemented in sequitur.cpp  ***********/
 /***************************************************************************/
 
@@ -283,6 +284,10 @@ class MoveStructure {
 
         void write_ftab();
         void read_ftab();
+
+        void build_kmerbv(const std::vector<uint32_t>& ks);
+        void load_kmerbv(uint32_t k);
+        void rebuild_all_p_if_needed();
 /*********  End of functions implemented in move_structure_io.cpp  *********/
 /***************************************************************************/
 
@@ -425,6 +430,11 @@ class MoveStructure {
 
         sdsl::bit_vector bits;
         sdsl::rank_support_v<> rbits;
+
+        // K-mer boundary bitvector and rank support (for MPHF ID + alternate count queries).
+        // Populated by build_kmerbv() / load_kmerbv(); empty unless those are called.
+        sdsl::bit_vector kmerbv;
+        sdsl::rank_support_v<> kmerbv_rank;
 };
 
 #endif

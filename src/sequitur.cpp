@@ -254,7 +254,8 @@ uint64_t MoveStructure::query_kmers_from_bidirectional(MoveQuery& mq, int32_t& p
     return kmers_found;
 }
 
-uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single, MoveInterval* interval_out) {
+uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single,
+                                          MoveInterval* interval_out) {
     size_t ftab_k = movi_options->get_ftab_k();
     size_t k = movi_options->get_k();
     auto& query_seq = mq.query();
@@ -358,28 +359,50 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
             pos_on_r = pos_on_r - step - 1;
         } else {
             if (kmer_counts) {
-                // Correct per-kmer count via the single-kmer presence search: the matched
-                // BWT interval's size is the k-mer's occurrence count, so no ftab is needed
-                // and we get a per-kmer count. On the doubled (fwd+rc) text the interval size
-                // equals occ(x)+occ(rc(x)) = KMC's canonical count. query_kmers_from returns
-                // the matched interval (not just a count) so a later kmer-bv pass can derive
-                // the MPHF id and a bitvector count from the very same search. This drops the
-                // positive-skip optimization for counts; the old bidirectional fast-count path
-                // (query_kmers_from_bidirectional) is left defined but unused here.
+                // Count via the single-kmer presence search (same path as --kmer-bv,
+                // minus the MPHF id): the BWT interval size is the k-mer's occurrence
+                // count on the doubled (fwd+rc) text = occ(x)+occ(rc(x)) = KMC's
+                // canonical count.  The old query_kmers_from_bidirectional path assumed
+                // an ftab (it set ftab_right = kmer_left + ftab_k - 1 and asserted the
+                // init advanced to kmer_left) and threw with the default ftab_k = 0.
                 MoveInterval interval;
-                uint64_t found = query_kmers_from(mq, pos_on_r, /*single=*/true, &interval);
-                uint64_t kmer_count = (found > 0 && !interval.is_empty()) ? interval.count(rlbwt) : 0;
-                mq.add_kmer(pos_on_r + 2 - k, kmer_count);
-                #pragma omp atomic
-                kmer_stats.positive_kmers += found;
-                #pragma omp atomic
-                kmer_stats.total_counts += kmer_count;
-            } else {
-                uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r);
-                // Outputing the kmer matches only works for the non-count mode (for now)
-                mq.add_kmer(pos_on_r + 2 - k, found_kmer_count);
+                uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r, /*single=*/true, &interval);
+                if (found_kmer_count > 0 && !interval.is_empty()) {
+                    uint64_t occ_count = interval.count(rlbwt);
+                    mq.add_kmer(pos_on_r + 2 - k, found_kmer_count,
+                                std::numeric_limits<uint64_t>::max(), occ_count);
+                } else {
+                    mq.add_kmer(pos_on_r + 2 - k, found_kmer_count);
+                }
                 #pragma omp atomic
                 kmer_stats.positive_kmers += found_kmer_count;
+            } else {
+                if (movi_options->is_kmer_bv()) {
+                    // Force single=true so backward_search_result is exactly the k-mer interval,
+                    // enabling a correct rank query for the MPHF ID.
+                    MoveInterval interval;
+                    uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r, /*single=*/true, &interval);
+                    if (found_kmer_count > 0 && !interval.is_empty()) {
+                        uint64_t lb = all_p[interval.run_start] + interval.offset_start;
+                        uint64_t kmer_id = kmerbv_rank(lb);
+                        // The BWT interval size is the k-mer's occurrence count on the
+                        // doubled (fwd+rc) text = occ(x)+occ(rc(x)) = KMC canonical count.
+                        // Pass found_kmer_count for the presence tally and occ_count as
+                        // the displayed multiplicity.
+                        uint64_t occ_count = interval.count(rlbwt);
+                        mq.add_kmer(pos_on_r + 2 - k, found_kmer_count, kmer_id, occ_count);
+                    } else {
+                        mq.add_kmer(pos_on_r + 2 - k, found_kmer_count);
+                    }
+                    #pragma omp atomic
+                    kmer_stats.positive_kmers += found_kmer_count;
+                } else {
+                    uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r);
+                    // Outputing the kmer matches only works for the non-count mode (for now)
+                    mq.add_kmer(pos_on_r + 2 - k, found_kmer_count);
+                    #pragma omp atomic
+                    kmer_stats.positive_kmers += found_kmer_count;
+                }
             }
         }
 

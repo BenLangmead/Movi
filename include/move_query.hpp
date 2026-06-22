@@ -11,11 +11,26 @@ class MoveQuery {
         std::string& query() { return query_string; }
         uint64_t length() { return query_string.length(); }
 
-        void add_kmer(int32_t pos_on_r, uint64_t kmer_count) {
-            // We use the same variable used for stroing matching lengths to store the kmer matches
+        // kmer_count drives the read-level presence tally (found_kmer_count =
+        // number of present k-mers).  display_count, when provided, is what is
+        // printed in the per-k-mer count field instead of kmer_count — used by
+        // the --kmer-bv path to show the true occurrence multiplicity while
+        // still counting presence one k-mer at a time.
+        void add_kmer(int32_t pos_on_r, uint64_t kmer_count,
+                      uint64_t kmer_id = std::numeric_limits<uint64_t>::max(),
+                      uint64_t display_count = std::numeric_limits<uint64_t>::max()) {
             if (kmer_count > 0) {
                 found_kmer_count += kmer_count;
-                matching_lengths_string += std::to_string(pos_on_r) + ":" + std::to_string(kmer_count) + " ";
+                uint64_t shown = (display_count != std::numeric_limits<uint64_t>::max())
+                                 ? display_count : kmer_count;
+                if (kmer_id != std::numeric_limits<uint64_t>::max()) {
+                    matching_lengths_string += std::to_string(pos_on_r) + ":" +
+                                               std::to_string(shown) + ":" +
+                                               std::to_string(kmer_id) + " ";
+                } else {
+                    matching_lengths_string += std::to_string(pos_on_r) + ":" +
+                                               std::to_string(shown) + " ";
+                }
             }
         }
 
