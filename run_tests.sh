@@ -80,6 +80,9 @@ if [ ! -d "$BUILD_DIR" ]; then
     mkdir -p "$BUILD_DIR"
 fi
 
+# Remember project root (for locating auxiliary test scripts) before descending
+PROJECT_ROOT=$(pwd)
+
 # Change to build directory
 cd "$BUILD_DIR"
 
@@ -166,6 +169,24 @@ fi
 ((TOTAL_TESTS++))
 
 if ! run_test "Classification Tests" "classification-tests"; then
+    ((FAILED_TESTS++))
+fi
+((TOTAL_TESTS++))
+
+# movi-co coroutine separator regression (differential vs production Movi).
+# Builds a multi-sequence --separators index so separator runs exist, then
+# checks movi-co's PMLs match production exactly. Guards the separator-run
+# (and broader inline-reimplementation) bug class.
+print_status "Running movi-co separator regression..."
+echo "----------------------------------------"
+if bash "$PROJECT_ROOT/tests/regression_movi_co_separators.sh" "$(pwd)"; then
+    echo "----------------------------------------"
+    print_success "movi-co separator regression passed"
+    echo ""
+else
+    echo "----------------------------------------"
+    print_error "movi-co separator regression failed"
+    echo ""
     ((FAILED_TESTS++))
 fi
 ((TOTAL_TESTS++))
