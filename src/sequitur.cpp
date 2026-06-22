@@ -322,6 +322,72 @@ uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool 
     }
 }
 
+// Count via the presence positive-skip walk + bitvector predecessor/successor.
+// This is the fast counting path: it does EXACTLY what the presence query does
+// (one continuous unidirectional backward search per run of present k-mers,
+// ftab-assisted, no bidirectional/rc bookkeeping), and resolves a count for
+// every present k-mer along the way using the count bitvector.
+//
+// As the backward search extends left, the current interval covers
+// read[pos_on_r .. anchor] (anchor = the right end). Whenever the covered
+// length reaches k, the LEFTMOST k-mer of the match, read[pos_on_r..pos_on_r+k-1],
+// is fully matched and the current (possibly longer-match, hence shrinking)
+// interval [lb,rb] is a SUBSET of that k-mer's interval. The k-mer's interval is
+// a single group in the count bitvector, so predecessor(lb)=its lb and
+// successor(rb)=its rb+1, giving count = succ(rb)-pred(lb) in O(1). When the
+// range empties we return; the outer loop re-anchors at the next k-mer.
+uint64_t MoveStructure::query_kmers_count_bv(MoveQuery& mq, int32_t& pos_on_r) {
+    size_t ftab_k = movi_options->get_ftab_k();
+    int32_t k = static_cast<int32_t>(movi_options->get_k());
+    auto& query_seq = mq.query();
+    int32_t pos_on_r_saved = pos_on_r;
+
+    uint64_t match_len = 0;
+    MoveInterval interval;
+    do {
+        interval = initialize_backward_search(mq, pos_on_r, match_len);
+        if (match_len == 0 and ftab_k > 1) {
+            pos_on_r -= 1;
+            pos_on_r_saved = pos_on_r;
+        }
+    } while (match_len == 0 and pos_on_r >= k - 1 and ftab_k > 1);
+
+    if (interval.is_empty()) {
+        pos_on_r = pos_on_r_saved - 1;
+        return 0;
+    }
+
+    // anchor = right end of the match; covered length = anchor - pos_on_r + 1.
+    const int32_t anchor = pos_on_r_saved;
+    uint64_t kmers_found = 0;
+    while (true) {
+        if (anchor - pos_on_r + 1 >= k) {
+            // Resolve the count of the leftmost k-mer (starts at pos_on_r).
+            uint64_t cnt = kmer_count_from_bv(interval);
+            mq.add_kmer(pos_on_r, /*present=*/1, std::numeric_limits<uint64_t>::max(), cnt);
+            kmers_found += 1;
+        }
+        if (pos_on_r <= 0) break;
+        MoveInterval prev = interval;
+        if (!backward_search_step(query_seq[pos_on_r - 1], interval)) {
+            interval = prev;  // step emptied the interval; stop this run
+            break;
+        }
+        pos_on_r -= 1;
+    }
+
+    if (kmers_found > 0) {
+        #pragma omp atomic
+        kmer_stats.positive_skipped += kmers_found - 1;
+        // pos_on_r is the leftmost resolved k-mer's start; the next k-mer to
+        // process ends at pos_on_r + k - 2 (mirrors query_kmers_from).
+        pos_on_r = pos_on_r + k - 2;
+    } else {
+        pos_on_r = pos_on_r_saved - 1;
+    }
+    return kmers_found;
+}
+
 void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
     size_t ftab_k = movi_options->get_ftab_k();
     size_t k = movi_options->get_k();
@@ -358,7 +424,13 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
             kmer_stats.look_ahead_skipped += step + 1;
             pos_on_r = pos_on_r - step - 1;
         } else {
-            if (kmer_counts) {
+            if (kmer_counts and movi_options->is_kmer_bv()) {
+                // Fast count path: presence positive-skip walk + bitvector
+                // predecessor/successor to resolve each present k-mer's count.
+                uint64_t found = query_kmers_count_bv(mq, pos_on_r);
+                #pragma omp atomic
+                kmer_stats.positive_kmers += found;
+            } else if (kmer_counts) {
                 // Count via the single-kmer presence search (same path as --kmer-bv,
                 // minus the MPHF id): the BWT interval size is the k-mer's occurrence
                 // count on the doubled (fwd+rc) text = occ(x)+occ(rc(x)) = KMC's
@@ -383,7 +455,7 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                     MoveInterval interval;
                     uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r, /*single=*/true, &interval);
                     if (found_kmer_count > 0 && !interval.is_empty()) {
-                        uint64_t lb = all_p[interval.run_start] + interval.offset_start;
+                        uint64_t lb = kmerbv_all_p[interval.run_start] + interval.offset_start;
                         uint64_t kmer_id = kmerbv_rank(lb);
                         // The BWT interval size is the k-mer's occurrence count on the
                         // doubled (fwd+rc) text = occ(x)+occ(rc(x)) = KMC canonical count.

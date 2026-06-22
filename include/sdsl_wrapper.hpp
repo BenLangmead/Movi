@@ -9,6 +9,7 @@
 // Include all SDSL headers
 #include <sdsl/bit_vectors.hpp>
 #include <sdsl/int_vector.hpp>
+#include <sdsl/dac_vector.hpp>
 
 #pragma GCC diagnostic pop
 

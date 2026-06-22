@@ -197,6 +197,7 @@ class MoveStructure {
         uint64_t query_kmers_from_bidirectional(MoveQuery& mq, int32_t& pos_on_r);
         uint64_t query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single = false,
                                   MoveInterval* interval_out = nullptr);
+        uint64_t query_kmers_count_bv(MoveQuery& mq, int32_t& pos_on_r);
 /*******  End of functions implemented in sequitur.cpp  ***********/
 /***************************************************************************/
 
@@ -431,10 +432,133 @@ class MoveStructure {
         sdsl::bit_vector bits;
         sdsl::rank_support_v<> rbits;
 
-        // K-mer boundary bitvector and rank support (for MPHF ID + alternate count queries).
+        // K-mer boundary bitvector B_k and rank support (for the MPHF ID; rank(lb)).
         // Populated by build_kmerbv() / load_kmerbv(); empty unless those are called.
         sdsl::bit_vector kmerbv;
         sdsl::rank_support_v<> kmerbv_rank;
+
+        // Run-local (all_p-free) k-mer count structure. A k-mer's count is
+        // resolved from Movi's run lengths plus a per-run record of which run heads
+        // are group-starts (ex) and where the interior group-starts fall (hi +
+        // gioff/gimark) -- no n-space count bitvector and no absolute-position
+        // table. (Earlier revisions kept several interchangeable representations of
+        // an n-space count bitvector -- plain bit_vector, sd_vector, rrr_vector, and
+        // a run-heads + Gi + E hybrid -- to map the space/speed frontier; this
+        // run-local form was both smallest and fastest, so it is the only one kept.)
+        //
+        // kmerbv_all_p: bit-packed per-run absolute rows (width ceil(log2 n)), built
+        // at load ONLY for the MPHF id query (--kmer --kmer-bv) to form
+        // lb = kmerbv_all_p[run] + offset for rank(lb) on B_k; the count needs none.
+        sdsl::int_vector<> kmerbv_all_p;
+        sdsl::bit_vector kmerbv_ex;  // ex[run] = 1 iff that run head is not a group-start
+        sdsl::bit_vector kmerbv_hi;  // hi[run] = 1 iff that run contains an interior group-start
+        // Per-run (all_p-free) interior group-starts. The per-entry offsets are
+        // DELTA-TRANSFORMED then variable-length coded: kmerbv_gioff[i] holds the
+        // first interior's absolute offset where gimark[i]==1 (run start), and the
+        // delta to the previous interior otherwise. Stored as a dac_vector<2>
+        // (Elias-style direct-access code, O(1) random read) -- ~5.7 MB vs 14.1 MB
+        // for the fixed-width offsets on ecoli10 k=31, since within-run offsets are
+        // small and increasing (mean delta ~3, p99 ~27). gimark + hi's rank map a
+        // run to its [a,b) slice; the slice is decoded sequentially, accumulating
+        // deltas (avg ~1.7 entries/run, so scanning beats binary search).
+        sdsl::rank_support_v<> kmerbv_hi_rank;
+        uint64_t kmerbv_hi_ones = 0;
+        sdsl::dac_vector<2> kmerbv_gioff;   // delta-transformed, variable-length
+        sdsl::bit_vector kmerbv_gimark;
+        sdsl::select_support_mcl<1> kmerbv_gimark_sel;
+
+        // [a,b) range of run's interior entries within kmerbv_gioff (empty if none).
+        inline void gi_range(uint64_t run, uint64_t& a, uint64_t& b) {
+            if (!kmerbv_hi[run]) { a = b = 0; return; }
+            uint64_t rho = kmerbv_hi_rank(run);                       // 0-indexed hi-run rank
+            a = kmerbv_gimark_sel(rho + 1);
+            b = (rho + 1 < kmerbv_hi_ones) ? kmerbv_gimark_sel(rho + 2) : kmerbv_gioff.size();
+        }
+        static const uint64_t GI_NONE = std::numeric_limits<uint64_t>::max();
+        // The slice is delta-coded: entry a is the absolute first offset, each
+        // later entry adds its delta. Offsets are strictly increasing, so a single
+        // forward scan resolves pred/succ/first/last.
+        inline uint64_t gi_pred_off(uint64_t run, uint64_t off) {     // largest interior <= off
+            uint64_t a, b; gi_range(run, a, b);
+            if (a == b) return GI_NONE;
+            uint64_t cur = kmerbv_gioff[a];
+            if (cur > off) return GI_NONE;
+            uint64_t best = cur;
+            for (uint64_t i = a + 1; i < b; ++i) { cur += kmerbv_gioff[i]; if (cur > off) break; best = cur; }
+            return best;
+        }
+        inline uint64_t gi_succ_off(uint64_t run, uint64_t off) {     // smallest interior > off
+            uint64_t a, b; gi_range(run, a, b);
+            if (a == b) return GI_NONE;
+            uint64_t cur = kmerbv_gioff[a];
+            if (cur > off) return cur;
+            for (uint64_t i = a + 1; i < b; ++i) { cur += kmerbv_gioff[i]; if (cur > off) return cur; }
+            return GI_NONE;
+        }
+        inline uint64_t gi_first_off(uint64_t run) {
+            uint64_t a, b; gi_range(run, a, b);
+            return a == b ? GI_NONE : (uint64_t)kmerbv_gioff[a];      // first entry is absolute
+        }
+        inline uint64_t gi_last_off(uint64_t run) {
+            uint64_t a, b; gi_range(run, a, b);
+            if (a == b) return GI_NONE;
+            uint64_t cur = kmerbv_gioff[a];
+            for (uint64_t i = a + 1; i < b; ++i) cur += kmerbv_gioff[i];
+            return cur;
+        }
+
+        // Count of the k-mer whose interval is `iv` (any sub-range of its true
+        // group works): predecessor of lb and successor of rb bracket the k-mer's
+        // single group. pred(p)=select(rank(p+1)); succ(p)=select(rank(p+1)+1).
+        inline uint64_t kmer_count_from_bv(const MoveInterval& iv) {
+            // Fully run-local count: no all_p, no absolute positions.
+            // count = down + iv_size + up, all from run lengths + per-run offsets.
+            uint64_t off_s = iv.offset_start, off_e = iv.offset_end;
+            uint64_t iv_size;
+            if (iv.run_start == iv.run_end) {
+                iv_size = off_e - off_s + 1;
+            } else {
+                iv_size = (get_n(iv.run_start) - off_s) + (off_e + 1);
+                for (uint64_t j = iv.run_start + 1; j < iv.run_end; ++j) iv_size += get_n(j);
+            }
+            // down: expand from lb' (run_start, off_s) to the group start
+            uint64_t down;
+            uint64_t gd = gi_pred_off(iv.run_start, off_s);
+            if (gd != GI_NONE) {
+                down = off_s - gd;                       // boundary is an interior in run_start
+            } else if (!kmerbv_ex[iv.run_start]) {
+                down = off_s;                            // boundary is run_start head
+            } else {                                     // excepted: walk into lower runs
+                down = off_s;
+                uint64_t j = iv.run_start;
+                while (true) {
+                    --j;
+                    uint64_t gl = gi_last_off(j);
+                    if (gl != GI_NONE) { down += get_n(j) - gl; break; }
+                    down += get_n(j);
+                    if (!kmerbv_ex[j]) break;            // run j head is the boundary
+                }
+            }
+            // up: expand from rb' (run_end, off_e) to the group end
+            uint64_t up;
+            uint64_t gu = gi_succ_off(iv.run_end, off_e);
+            if (gu != GI_NONE) {
+                up = gu - 1 - off_e;                     // boundary is an interior in run_end
+            } else if (iv.run_end + 1 >= r || !kmerbv_ex[iv.run_end + 1]) {
+                up = get_n(iv.run_end) - 1 - off_e;      // next run head is the boundary
+            } else {                                     // excepted: walk into upper runs
+                up = get_n(iv.run_end) - 1 - off_e;
+                uint64_t j = iv.run_end + 1;
+                while (j < r) {
+                    if (!kmerbv_ex[j]) break;            // run j head (offset 0) is the boundary
+                    uint64_t gf = gi_first_off(j);       // else nearest is this run's first interior
+                    if (gf != GI_NONE) { up += gf; break; }
+                    up += get_n(j);
+                    ++j;
+                }
+            }
+            return down + iv_size + up;
+        }
 };
 
 #endif
