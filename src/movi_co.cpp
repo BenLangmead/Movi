@@ -147,23 +147,48 @@ static std::mutex output_mutex;
 // Flush interval for periodic flushing
 static constexpr int FLUSH_INTERVAL = 100;  // Flush every 100 lines
 
-// Shared reader that manages single gzFile and kseq_t
+// Shared reader that parses FASTQ/A records in batches and hands them to
+// coroutines through per-coroutine slots. The hot path neither parses one
+// record at a time nor copies each read: the scheduler moves a record from the
+// current batch into the awaiting coroutine's slot, and the coroutine uses it
+// in place (zero per-read copy). Single-threaded -- no background I/O thread --
+// so the query still runs on exactly one CPU.
 class SharedFastqReader {
 public:
     struct ReadData {
-        bool valid;
+        bool valid = false;
         string name;
         string sequence;
     };
-    
+
 private:
     gzFile fp;
     kseq_t* seq;
-    ReadData pending_read;
-    int read_call_count = 0;  // Add this
-    
+    std::vector<ReadData> batch;   // current batch of parsed records
+    size_t batch_pos = 0;          // next unserved record within batch
+    std::vector<ReadData> slots;   // one slot per coroutine (zero-copy handoff)
+    static constexpr size_t BATCH_N = 256;
+
+    // Parse up to BATCH_N records in a tight loop. This amortizes the kseq
+    // parse / gzip-decompression call overhead and keeps it off the per-read
+    // critical path (one refill stall every BATCH_N reads instead of a parse
+    // interleaved with every read's compute).
+    void refill() {
+        batch.clear();
+        batch_pos = 0;
+        for (size_t k = 0; k < BATCH_N; k++) {
+            int l = kseq_read(seq);
+            if (l < 0) break;  // EOF (-1) or error (-2/-3)
+            ReadData rd;
+            rd.valid = true;
+            rd.name.assign(seq->name.s, seq->name.l);
+            rd.sequence.assign(seq->seq.s, seq->seq.l);
+            batch.push_back(std::move(rd));
+        }
+    }
+
 public:
-    SharedFastqReader(const string& fastq_file) : fp(nullptr), seq(nullptr) {
+    SharedFastqReader(const string& fastq_file, int concurrency) : fp(nullptr), seq(nullptr) {
         fp = gzopen(fastq_file.c_str(), "r");
         if (!fp) {
             throw std::runtime_error("Cannot open FASTQ file: " + fastq_file);
@@ -173,64 +198,48 @@ public:
             gzclose(fp);
             throw std::runtime_error("Cannot initialize kseq");
         }
+        slots.resize(concurrency);
     }
-    
+
     ~SharedFastqReader() {
         if (seq) kseq_destroy(seq);
         if (fp) gzclose(fp);
     }
-    
-    // Read next sequence into pending_read
-    bool read_next() {
-        read_call_count++;
-        DEBUG_MSG_CO("DEBUG: read_next() called (call #%d)\n", read_call_count);
-        int l = kseq_read(seq);
-        if (l < 0) {
-            DEBUG_MSG_CO("DEBUG: kseq_read returned %d on call #%d\n", l, read_call_count);
-            // kseq_read returns:
-            // -1: EOF
-            // -2: truncated quality string  
-            // -3: error reading stream
-            pending_read.valid = false;
-            return false;
-        }
-        DEBUG_MSG_CO("DEBUG: kseq_read returned length %d on call #%d\n", l, read_call_count);
-        pending_read.valid = true;
-        pending_read.name = string(seq->name.s);
-        pending_read.sequence = string(seq->seq.s);
+
+    // Move the next record into coroutine id's slot. Returns false at EOF
+    // (the slot is marked invalid).
+    bool serve_next(int id) {
+        if (batch_pos >= batch.size()) refill();
+        if (batch_pos >= batch.size()) { slots[id].valid = false; return false; }
+        slots[id] = std::move(batch[batch_pos++]);
         return true;
     }
-    
-    const ReadData& get_pending_read() const { return pending_read; }
+
+    ReadData& slot(int id) { return slots[id]; }
 };
 
-// Awaitable for requesting a read from the shared reader
+// Awaitable: suspends the coroutine until the scheduler serves a read into this
+// coroutine's slot, then hands back a reference to that slot (no copy).
 struct read_awaitable {
     SharedFastqReader* reader;
     coroutine_handle<>* stored_handle;  // Where to store the coroutine handle
-    
+    int coroutine_id;
+
     bool await_ready() const noexcept { return false; }
-    
+
     template<typename Promise>
     void await_suspend(coroutine_handle<Promise> h) {
-        DEBUG_MSG_CO("DEBUG: await_suspend storing handle for coroutine\n");
         *stored_handle = h;
-        DEBUG_MSG_CO("DEBUG: handle stored, stored_handle pointer is %s, handle value is %s\n",
-             (stored_handle ? "non-null" : "null"),
-             (h ? "non-null" : "null"));
     }
-    
-    SharedFastqReader::ReadData await_resume() {
-        return reader->get_pending_read();
+
+    SharedFastqReader::ReadData& await_resume() {
+        return reader->slot(coroutine_id);
     }
 };
 
 // Helper to create awaitable
-read_awaitable get_next_read(SharedFastqReader& reader, coroutine_handle<>& handle_storage) {
-    read_awaitable awaiter;
-    awaiter.reader = &reader;
-    awaiter.stored_handle = &handle_storage;
-    return awaiter;
+read_awaitable get_next_read(SharedFastqReader& reader, coroutine_handle<>& handle_storage, int coroutine_id) {
+    return read_awaitable{&reader, &handle_storage, coroutine_id};
 }
 
 // Coroutine return type for query_pml_coroutine
@@ -317,11 +326,17 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
     char output_buffer[OUTPUT_BUFFER_SIZE];
     size_t buffer_pos = 0;
     int buffer_line_count = 0;
-    
+
+    // Per-coroutine work buffers reused across reads (cleared, not reallocated,
+    // each read) so there is no per-read heap churn.
+    std::vector<uint16_t> matching_lens;
+    std::string out_line;
+    char numbuf[24];
+
     while (true) {
         DEBUG_MSG_CO("DEBUG: Coroutine %d about to await next read\n", coroutine_id);
         // Request next read - this suspends until scheduler reads it
-        auto read_data = co_await get_next_read(reader, my_handle_storage);
+        auto& read_data = co_await get_next_read(reader, my_handle_storage, coroutine_id);
         
         DEBUG_MSG_CO("DEBUG: Coroutine %d resumed with read, valid=%d\n", coroutine_id, read_data.valid ? 1 : 0);
         if (!read_data.valid) break;  // EOF
@@ -330,12 +345,12 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
         int read_bases = read_data.sequence.length();
         total_bases += read_bases;
         
-        // Process the read
-        string query_seq = read_data.sequence;
-        std::reverse(query_seq.begin(), query_seq.end());
-        MoveQuery mq(query_seq);
-
-        auto& R = mq.query();
+        // Process the read in place: reverse this coroutine's own copy of the
+        // sequence and use it directly as the query (no extra copies, no
+        // per-read MoveQuery allocation).
+        std::string& R = read_data.sequence;
+        std::reverse(R.begin(), R.end());
+        matching_lens.clear();
         int32_t roff = R.length() - 1;    // offset in read
         uint64_t idx = r - 1;             // row index
         uint64_t match_len = 0;           // match length (consecurive case 1s) so far
@@ -433,8 +448,10 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             assert(offset < get_n(idx));
             assert(idx < rlbwt.size());
             
-            // Add matching length to query
-            mq.add_ml(match_len, movi_options->is_stdout());
+            // Record the PML (clamped to uint16_t), reusing the vector capacity.
+            matching_lens.push_back(match_len > numeric_limits<uint16_t>::max()
+                                    ? numeric_limits<uint16_t>::max()
+                                    : static_cast<uint16_t>(match_len));
             roff--; // move left by 1 on query
             
             // Begin LF step.  Start by computing index of next row id where this
@@ -469,37 +486,34 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
             idx = new_idx;
         }
         
-        // Output results for this read.
-        // Build the full line locally so arbitrarily long reads can never
-        // overflow/truncate the shared buffer (the previous fixed-buffer logic
-        // dropped values and newlines on long reads, corrupting output).
-        auto& matching_lengths = mq.get_matching_lengths();
-        std::string line;
-        line.reserve(read_data.name.size() + matching_lengths.size() * 3 + 2);
-        line.append(read_data.name);
-        line.push_back(' ');
-        char numbuf[24];
-        for (size_t i = 0; i < matching_lengths.size(); i++) {
-            size_t w = write_uint_to_buffer(numbuf, sizeof(numbuf), matching_lengths[i]);
-            line.append(numbuf, w);
-            if (i + 1 < matching_lengths.size()) line.push_back(' ');
+        // Output results for this read into the reused line buffer (cleared
+        // each read so capacity is retained). Building the whole line first
+        // means arbitrarily long reads can never overflow/truncate the shared
+        // buffer.
+        out_line.clear();
+        out_line.append(read_data.name);
+        out_line.push_back(' ');
+        for (size_t i = 0; i < matching_lens.size(); i++) {
+            size_t w = write_uint_to_buffer(numbuf, sizeof(numbuf), matching_lens[i]);
+            out_line.append(numbuf, w);
+            if (i + 1 < matching_lens.size()) out_line.push_back(' ');
         }
-        line.push_back('\n');
+        out_line.push_back('\n');
 
         // Emit: flush the shared buffer if the line wouldn't fit; write
         // oversized lines directly so nothing is ever truncated.
-        if (line.size() > OUTPUT_BUFFER_SIZE) {
+        if (out_line.size() > OUTPUT_BUFFER_SIZE) {
             std::lock_guard<std::mutex> lock(output_mutex);
             if (buffer_pos > 0) { fwrite(output_buffer, 1, buffer_pos, stdout_buf); buffer_pos = 0; }
-            fwrite(line.data(), 1, line.size(), stdout_buf);
+            fwrite(out_line.data(), 1, out_line.size(), stdout_buf);
         } else {
-            if (buffer_pos + line.size() > OUTPUT_BUFFER_SIZE) {
+            if (buffer_pos + out_line.size() > OUTPUT_BUFFER_SIZE) {
                 std::lock_guard<std::mutex> lock(output_mutex);
                 fwrite(output_buffer, 1, buffer_pos, stdout_buf);
                 buffer_pos = 0;
             }
-            std::memcpy(output_buffer + buffer_pos, line.data(), line.size());
-            buffer_pos += line.size();
+            std::memcpy(output_buffer + buffer_pos, out_line.data(), out_line.size());
+            buffer_pos += out_line.size();
         }
         DEBUG_MSG_CO("DEBUG: Coroutine %d finished processing read %d, looping back\n", coroutine_id, read_count);
     }
@@ -530,7 +544,7 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     int64_t total_bases = 0;
     
     // Single shared reader for all coroutines
-    SharedFastqReader reader(fastq_file);
+    SharedFastqReader reader(fastq_file, concurrency);
     
     // Storage for coroutine handles waiting for reads
     std::vector<coroutine_handle<>> waiting_handles(concurrency);
@@ -564,28 +578,15 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
             
             // Check if this coroutine is waiting for a read
             if (waiting_handles[i]) {
-                DEBUG_MSG_CO("DEBUG: Scheduler detected waiting_handles[%d] is set\n", i);
                 total_reads_served++;
-                // Read next sequence and resume the coroutine
-                bool read_success = reader.read_next();
-                if (read_success) {
-                    // Track total bases processed
-                    const auto& read_data = reader.get_pending_read();
-                    total_bases += read_data.sequence.length();
-                    
-                    waiting_handles[i].resume();
-                    waiting_handles[i] = nullptr;  // Clear the handle
-                    if (!coroutines[i].is_done()) {
-                        active_coroutines++;
-                    }
-                } else {
-                    // EOF - resume to let coroutine know there are no more reads
-                    DEBUG_MSG_CO("DEBUG: EOF detected after serving %d reads to coroutines\n", total_reads_served);
-                    waiting_handles[i].resume();
-                    waiting_handles[i] = nullptr;
-                    if (!coroutines[i].is_done()) {
-                        active_coroutines++;
-                    }
+                // Move the next batched record into this coroutine's slot.
+                if (reader.serve_next(i)) {
+                    total_bases += reader.slot(i).sequence.length();
+                }
+                waiting_handles[i].resume();
+                waiting_handles[i] = nullptr;
+                if (!coroutines[i].is_done()) {
+                    active_coroutines++;
                 }
             } else {
                 DEBUG_MSG_CO("DEBUG: Scheduler iteration %d, coroutine %d not waiting (handle is %s)\n",
