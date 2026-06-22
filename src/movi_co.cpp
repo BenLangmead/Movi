@@ -71,6 +71,14 @@ static bool g_bpf_output = false;
 // When true (--reorder), emit reads in input order via the reorder buffer;
 // default is completion order (lower overhead, matches mainline Movi's order).
 static bool g_ordered_output = false;
+// MEM query mode (movi-co also supports --mem) and its parameters.
+static bool g_mem_query = false;
+static int  g_ftab_k = 0;
+static int  g_min_mem_length = 0;
+// k-mer query mode (movi-co also supports --kmer / --kmer-count) and its length.
+static bool g_kmer_query = false;
+static bool g_kmer_count = false;
+static int  g_k = 0;
 
 // Setup buffered stdout and stderr
 static FILE* stdout_buf = nullptr;
@@ -579,21 +587,459 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
 }
 
 
+// Coroutine MEM query with latency hiding. Mirrors MoveStructure::query_mems /
+// query_mem_bml (min_mem_length > 1 path). Yields only at the LF destination
+// jump inside each backward/forward search step, and before ftab lookups.
+// extend_bidirectional is inlined so the single co_yield can be placed at the
+// fw LF_move; the subsequent sequential work (skip scan, rc walk) gets no yield
+// because the hardware prefetcher covers sequential rlbwt row access.
+// The skip scan also accumulates fw_count (= count of c in fw_before), replacing
+// the separate fw_interval.count(rlbwt) scan for the rc-end walk.
+MoveStructure::query_pml_coroutine_return_type MoveStructure::query_mem_coroutine(
+    SharedFastqReader& reader,
+    coroutine_handle<>& my_handle_storage,
+    int coroutine_id) {
+
+    const int32_t min_mem_length = movi_options->get_min_mem_length();
+    const size_t  ftab_k = movi_options->get_ftab_k();
+    char numbuf[24];
+    std::string out_line;
+
+    // Split backward_search_step at the LF destination jump — the only cold-miss
+    // access in search. step_prep does update_interval (sequential, hw-prefetchable)
+    // then computes and prefetches the LF destination rows. step_finish does the
+    // LF_move using the precomputed ids so the prefetched rows are exactly used.
+    uint64_t pf_id_s = 0, pf_id_e = 0;
+    auto step_prep = [&](MoveInterval& iv, char c) -> bool {
+        if (!check_alphabet(c)) { iv.make_empty(); return false; }
+        update_interval(iv, c);
+        if (iv.is_empty()) return false;
+        pf_id_s = get_id(iv.run_start);
+        pf_id_e = get_id(iv.run_end);
+        my_prefetch_r((void*)(&(rlbwt[0]) + pf_id_s));
+        my_prefetch_r((void*)(&(rlbwt[0]) + pf_id_e));
+        return true;
+    };
+    auto step_finish = [&](MoveInterval& iv) {
+        LF_move(iv.offset_start, iv.run_start, pf_id_s);
+        LF_move(iv.offset_end, iv.run_end, pf_id_e);
+    };
+
+    // Prefetch both fw and rc ftab entries before initialize_bidirectional_search.
+    auto ftab_pf_bidi = [&](std::string& qs, int32_t pos) -> bool {
+        if (ftab_k <= 1 || pos < static_cast<int32_t>(ftab_k) - 1) return false;
+        int32_t start = pos - static_cast<int32_t>(ftab_k) + 1;
+        uint64_t fw = kmer_to_number(ftab_k, qs, start, alphamap, false);
+        uint64_t rc = kmer_to_number(ftab_k, qs, start, alphamap, true);
+        bool any = false;
+        if (fw != std::numeric_limits<uint64_t>::max()) { my_prefetch_r((void*)(&(ftab[0]) + fw)); any = true; }
+        if (rc != std::numeric_limits<uint64_t>::max()) { my_prefetch_r((void*)(&(ftab[0]) + rc)); any = true; }
+        return any;
+    };
+    // Prefetch fw ftab entry before initialize_backward_search (next MEM start).
+    auto ftab_pf = [&](std::string& qs, int32_t pos) -> bool {
+        if (ftab_k <= 1 || pos < static_cast<int32_t>(ftab_k) - 1) return false;
+        uint64_t code = kmer_to_number(ftab_k, qs, pos - static_cast<int32_t>(ftab_k) + 1, alphamap);
+        if (code == std::numeric_limits<uint64_t>::max()) return false;
+        my_prefetch_r((void*)(&(ftab[0]) + code));
+        return true;
+    };
+
+    while (true) {
+        auto& read_data = co_await get_next_read(reader, my_handle_storage, coroutine_id);
+        if (!read_data.valid) break;
+
+        MoveQuery mq(std::move(read_data.sequence));
+        mq.set_query_id(read_data.name);
+        std::string& query_seq = mq.query();
+        const int32_t qlen = static_cast<int32_t>(query_seq.length());
+
+        int32_t pos_on_r = 0;
+        // Cast to size_t replicates production's `pos_on_r < query_seq.length()`
+        // (int32_t < size_t): when pos_on_r goes negative after a MEM that reaches
+        // end-of-read, the cast wraps to SIZE_MAX > qlen and the loop exits.
+        while (static_cast<size_t>(pos_on_r) < static_cast<size_t>(qlen)) {
+            // ---- query_mem_bml(pos_on_r) inlined with prefetch + co_yield ----
+            if (pos_on_r + min_mem_length > qlen) { pos_on_r = qlen; break; }
+
+            uint64_t match_len = 0;
+            int32_t init_pos = pos_on_r + min_mem_length - 1;
+
+            // Prefetch both ftab entries before the cold bidirectional initialization.
+            if (ftab_pf_bidi(query_seq, init_pos)) co_yield monostate{};
+            MoveBiInterval bi_interval = initialize_bidirectional_search(mq, init_pos, match_len);
+            bool ftab_skip = match_len <= 1 && ftab_k <= static_cast<size_t>(min_mem_length);
+            --init_pos;
+
+            // Prefetch fw_interval entry-point rows so the first update_interval
+            // in the left-extension loop doesn't stall on a cold ftab-seeded interval.
+            if (!ftab_skip && match_len > 1 && !bi_interval.fw_interval.is_empty()) {
+                my_prefetch_r((void*)(&(rlbwt[0]) + bi_interval.fw_interval.run_start));
+                my_prefetch_r((void*)(&(rlbwt[0]) + bi_interval.fw_interval.run_end));
+                co_yield monostate{};
+            }
+
+            bool failed = false;
+            if (ftab_skip) {
+                // ftab can't seed bidirectional; pure backward search to find pos_on_r.
+                MoveInterval fw_interval = bi_interval.fw_interval;
+                for (size_t j = 0; j <= static_cast<size_t>(init_pos - pos_on_r); ++j) {
+                    if (!step_prep(fw_interval, query_seq[init_pos - j])) {
+                        pos_on_r = init_pos - j + 1; failed = true; break;
+                    }
+                    co_yield monostate{};
+                    step_finish(fw_interval);
+                    ++match_len;
+                }
+                if (!failed) throw std::runtime_error("Extended past failed ftab");
+            } else {
+                // Left extension: extend_bidirectional inlined so co_yield is placed
+                // only at the LF jump on fw_interval. Sequential scan and rc walk
+                // follow step_finish with no yield.
+                for (size_t j = 0; j <= static_cast<size_t>(init_pos - pos_on_r); ++j) {
+                    char c_ = query_seq[init_pos - j];
+                    char c_comp = complement(c_);
+
+                    MoveInterval fw_before = bi_interval.fw_interval;
+
+                    if (!step_prep(bi_interval.fw_interval, c_)) {
+                        pos_on_r = init_pos - j + 1; failed = true; break;
+                    }
+                    co_yield monostate{};   // hide LF destination miss on fw
+                    step_finish(bi_interval.fw_interval);
+
+                    // Combined skip-count + fw_count scan over fw_before (one pass).
+                    // skip  → how far to walk rc_interval.start forward.
+                    // fw_count → count of c_ in fw_before = count of new fw_interval
+                    //            (bidirectional BWT invariant), used for rc end walk
+                    //            instead of a separate fw_interval.count(rlbwt) call.
+                    uint64_t skip = 0, fw_count = 0;
+                    uint64_t cur = fw_before.run_start;
+                    uint64_t cur_off = fw_before.offset_start;
+                    while (cur <= fw_before.run_end) {
+                        if (cur != end_bwt_idx) {
+                            char ch = get_char(cur);
+                            uint64_t n = (cur != fw_before.run_end) ?
+                                get_n(cur) - cur_off :
+                                fw_before.offset_end - cur_off + 1;
+                            if (complement(ch) < c_comp) skip += n;
+                            if (ch == c_) fw_count += n;
+                        } else {
+                            skip += 1;
+                        }
+                        ++cur;
+                        cur_off = 0;
+                    }
+
+                    // Walk rc_interval.start forward by skip.
+                    MoveInterval& rc = bi_interval.rc_interval;
+                    while (skip != 0) {
+                        uint64_t rows_after = get_n(rc.run_start) - 1 - rc.offset_start;
+                        if (rows_after >= skip) {
+                            rc.offset_start += skip;
+                            skip = 0;
+                        } else {
+                            rc.run_start += 1;
+                            rc.offset_start = 0;
+                            skip -= rows_after + 1;
+                        }
+                    }
+
+                    // Walk rc_interval.end to rc_interval.start + (fw_count - 1).
+                    rc.run_end = rc.run_start;
+                    rc.offset_end = rc.offset_start;
+                    uint64_t fw_skip = fw_count - 1;
+                    while (fw_skip != 0) {
+                        uint64_t rows_after = get_n(rc.run_end) - 1 - rc.offset_end;
+                        if (rows_after >= fw_skip) {
+                            rc.offset_end += fw_skip;
+                            fw_skip = 0;
+                        } else {
+                            rc.run_end += 1;
+                            rc.offset_end = 0;
+                            fw_skip -= rows_after + 1;
+                        }
+                    }
+
+                    bi_interval.match_len += 1;
+                    ++match_len;
+                }
+            }
+            if (failed) continue;
+
+            // Forward extension: find right end of MEM (exclusive).
+            // forward_search_step(c, iv) == backward_search_step(complement(c), iv).
+            MoveInterval rc_interval = bi_interval.rc_interval;
+            MoveInterval rc_before = rc_interval;
+            size_t i;
+            for (i = static_cast<size_t>(pos_on_r) + min_mem_length;
+                 i < static_cast<size_t>(qlen); ++i) {
+                rc_before = rc_interval;
+                if (!step_prep(rc_interval, complement(query_seq[i]))) {
+                    rc_interval = rc_before; break;
+                }
+                co_yield monostate{};       // hide LF destination miss on rc
+                step_finish(rc_interval);
+                ++match_len;
+            }
+
+            mq.add_mem(pos_on_r, i, rc_interval.count(rlbwt));
+
+            // Backward extension to find next candidate MEM's left end.
+            size_t end_pos_on_r = i;
+            if (end_pos_on_r < static_cast<size_t>(qlen)) {
+                init_pos = static_cast<int32_t>(end_pos_on_r);
+                match_len = 0;
+                if (ftab_pf(query_seq, init_pos)) co_yield monostate{};
+                MoveInterval fw_interval = initialize_backward_search(mq, init_pos, match_len);
+                ++match_len;
+                --init_pos;
+                for (i = 0; i <= static_cast<size_t>(init_pos - (pos_on_r + 1)); ++i) {
+                    if (!step_prep(fw_interval, query_seq[init_pos - i])) break;
+                    co_yield monostate{};   // hide LF destination miss on fw
+                    step_finish(fw_interval);
+                    ++match_len;
+                }
+            }
+            // When end_pos_on_r >= qlen the else branch is skipped (matching
+            // the reference), leaving i == qlen from the forward loop so that
+            // pos_on_r = init_pos - qlen + 1 goes negative; the size_t cast in
+            // the outer while condition then terminates the loop correctly.
+            pos_on_r = (init_pos - static_cast<int32_t>(i)) + 1;
+        }
+
+        // Emit this read's MEMs (id \t start \t end \t count), one per line.
+        out_line.clear();
+        for (auto& m : mq.get_mems()) {
+            out_line.append(mq.get_query_id());
+            out_line.push_back('\t');
+            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.start));
+            out_line.push_back('\t');
+            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.end));
+            out_line.push_back('\t');
+            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.count));
+            out_line.push_back('\n');
+        }
+        g_emitter.emit(read_data.seq, out_line);
+    }
+    co_return;
+}
+
+
+// Coroutine k-mer query with latency hiding. Mirrors MoveStructure::query_all_kmers
+// (together with query_kmers_from and look_ahead_backward_search) exactly -- both
+// skip heuristics included -- so output is byte-identical to production
+// `movi query --kmer [--kmer-count]`. The only change versus production is a
+// prefetch + co_yield issued before each backward_search_step (the cache-missing
+// LF_move). Those two inner backward-search loops are inlined here because suspend
+// points cannot live in called functions. One coroutine serves both modes via
+// count_mode. k-mer search uses plain (not bidirectional) backward search, so no
+// reverse-complement index is needed and the read is NOT reversed.
+MoveStructure::query_pml_coroutine_return_type MoveStructure::query_kmer_coroutine(
+    SharedFastqReader& reader,
+    coroutine_handle<>& my_handle_storage,
+    int coroutine_id) {
+
+    const size_t  ftab_k = movi_options->get_ftab_k();
+    const int32_t k = static_cast<int32_t>(movi_options->get_k());
+    const bool    count_mode = movi_options->is_kmer_count();
+    std::string out_line;
+    char numbuf[24];
+
+    // One backward_search_step, split so the prefetch + co_yield sit at the only
+    // long-range jump in MODE-6 interval search: the LF destination row. step_prep
+    // does the sequential part (update_interval's run scan needs no prefetch),
+    // then -- the instant we learn the LF destinations get_id(run_start/run_end) --
+    // prefetches those move-structure rows and returns. The caller co_yields so the
+    // prefetch lands while other coroutines run, then step_finish does the LF_move
+    // that actually dereferences the destination (get_n on the prefetched row).
+    // The precomputed ids are handed to LF_move so the prefetched row is exactly
+    // the one accessed. Returns false (no jump) when the step empties the interval.
+    uint64_t pf_id_s = 0, pf_id_e = 0;
+    auto step_prep = [&](MoveInterval& iv, char c) -> bool {
+        if (!check_alphabet(c)) { iv.make_empty(); return false; }
+        update_interval(iv, c);
+        if (iv.is_empty()) return false;
+        pf_id_s = get_id(iv.run_start);
+        pf_id_e = get_id(iv.run_end);
+        my_prefetch_r((void*)(&(rlbwt[0]) + pf_id_s));
+        my_prefetch_r((void*)(&(rlbwt[0]) + pf_id_e));
+        return true;
+    };
+    auto step_finish = [&](MoveInterval& iv) {
+        LF_move(iv.offset_start, iv.run_start, pf_id_s);
+        LF_move(iv.offset_end, iv.run_end, pf_id_e);
+    };
+
+    // The other long-range jump: initialize_backward_search's ftab lookup. The
+    // ftab index (kmer_code) is computed cheaply from the query characters
+    // (sequential, cached), but ftab[kmer_code] is a random access into a large
+    // array (tens to hundreds of MB). Prefetch that entry; the caller co_yields so
+    // it lands before initialize_backward_search dereferences it. Returns false
+    // when no ftab access will happen (ftab_k<=1, too few chars, or illegal kmer)
+    // so the caller can skip the (then-pointless) yield -- no overhead in no-ftab.
+    auto ftab_pf = [&](std::string& qs, int32_t pos) -> bool {
+        if (ftab_k <= 1 || pos < static_cast<int32_t>(ftab_k) - 1) return false;
+        uint64_t code = kmer_to_number(ftab_k, qs, pos - static_cast<int32_t>(ftab_k) + 1, alphamap);
+        if (code == std::numeric_limits<uint64_t>::max()) return false;
+        my_prefetch_r((void*)(&(ftab[0]) + code));
+        return true;
+    };
+
+    while (true) {
+        auto& read_data = co_await get_next_read(reader, my_handle_storage, coroutine_id);
+        if (!read_data.valid) break;
+
+        // Own the sequence (cheap move) so the shared primitives, which take a
+        // MoveQuery&, can be reused directly.
+        MoveQuery mq(std::move(read_data.sequence));
+        mq.set_query_id(read_data.name);
+        std::string& query_seq = mq.query();
+        const int32_t qlen = static_cast<int32_t>(query_seq.length());
+        // Match production's denominator exactly (movi.cpp output_kmers call),
+        // including the unsigned underflow when the read is shorter than k.
+        const uint64_t all_kmer_count = mq.length() - movi_options->get_k() + 1;
+
+        int32_t pos_on_r = qlen - 1;
+
+        // k == 1 is a no-op for per-read kmer output in production query_all_kmers
+        // (it only bumps a global stat, never calls add_kmer).
+        if (k != 1 && qlen >= k) {
+            while (pos_on_r >= 0 && !check_alphabet(query_seq[pos_on_r])) pos_on_r -= 1;
+
+            int32_t step = k / 3;
+            if (k - step < static_cast<int32_t>(ftab_k)) step = k - static_cast<int32_t>(ftab_k) - 1;
+
+            while (pos_on_r >= k - 1) {
+                bool did_search = true;
+
+                if (pos_on_r >= k - 1 + step) {
+                    // ---- look_ahead_backward_search(mq, pos_on_r, step) inlined ----
+                    uint64_t la_match_len = 0;
+                    int32_t la_pos = pos_on_r - step;
+                    if (ftab_pf(query_seq, la_pos)) co_yield monostate{};
+                    MoveInterval la_iv = initialize_backward_search(mq, la_pos, la_match_len);
+                    const int32_t la_max = k - step - static_cast<int32_t>(la_match_len);
+                    // inlined backward_search(query_seq, la_pos, la_iv, la_max)
+                    const int32_t la_saved = la_pos;
+                    while (la_pos > 0 && !la_iv.is_empty()) {
+                        if (step_prep(la_iv, query_seq[la_pos - 1])) {
+                            co_yield monostate{};
+                            step_finish(la_iv);
+                            la_pos -= 1;
+                        }
+                        if (la_saved - la_pos > la_max) break;
+                    }
+                    if (pos_on_r - la_pos < k - 1) {     // look-ahead says "skip"
+                        pos_on_r = pos_on_r - step - 1;
+                        did_search = false;
+                    }
+                }
+
+                if (did_search) {
+                    // ---- query_kmers_from(mq, pos_on_r, single=count_mode, &kc) inlined ----
+                    const int32_t kmer_end = pos_on_r;   // captured before pos_on_r moves
+                    int32_t pos_saved = pos_on_r;
+                    uint64_t match_len = 0;
+                    MoveInterval init_iv;
+                    do {
+                        if (ftab_pf(query_seq, pos_on_r)) co_yield monostate{};
+                        init_iv = initialize_backward_search(mq, pos_on_r, match_len);
+                        if (match_len == 0 && ftab_k > 1) {
+                            pos_on_r -= 1;
+                            pos_saved = pos_on_r;
+                        }
+                    } while (match_len == 0 && pos_on_r >= k - 1 && ftab_k > 1);
+
+                    const int32_t bs_max = count_mode
+                        ? (k - static_cast<int32_t>(match_len) - 2)
+                        : std::numeric_limits<int32_t>::max();
+                    // inlined backward_search(query_seq, pos_on_r, init_iv, bs_max)
+                    MoveInterval bs_iv = init_iv;
+                    MoveInterval bs_prev = bs_iv;
+                    const int32_t bs_saved = pos_on_r;
+                    while (pos_on_r > 0 && !bs_iv.is_empty()) {
+                        bs_prev = bs_iv;
+                        if (step_prep(bs_iv, query_seq[pos_on_r - 1])) {
+                            co_yield monostate{};
+                            step_finish(bs_iv);
+                            pos_on_r -= 1;
+                        }
+                        if (bs_saved - pos_on_r > bs_max) break;
+                    }
+                    MoveInterval bs_result = bs_iv.is_empty() ? bs_prev : bs_iv;
+
+                    uint64_t found = 0, kc = 0;
+                    if (bs_result.is_empty()) {
+                        pos_on_r = pos_saved - 1;
+                    } else if (pos_saved - pos_on_r >= k - 1) {
+                        found = static_cast<uint64_t>(pos_saved - pos_on_r - k + 2);
+                        if (count_mode) kc = bs_result.count(rlbwt);
+                        pos_on_r = pos_on_r + k - 2;
+                    } else {
+                        pos_on_r = pos_saved - 1;
+                    }
+
+                    if (count_mode) {
+                        mq.add_kmer(kmer_end - k + 1, kc);
+                    } else {
+                        mq.add_kmer(pos_on_r + 2 - k, found);
+                    }
+                }
+
+                while (pos_on_r >= 0 && !check_alphabet(query_seq[pos_on_r])) pos_on_r -= 1;
+            }
+        }
+
+        // Build the output line exactly like output_kmers(): id \t found/all \t poslist
+        out_line.clear();
+        out_line.append(mq.get_query_id());
+        out_line.push_back('\t');
+        out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), mq.found_kmer_count));
+        out_line.push_back('/');
+        out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), all_kmer_count));
+        out_line.push_back('\t');
+        out_line.append(mq.get_matching_lengths_string());
+        out_line.push_back('\n');
+        g_emitter.emit(read_data.seq, out_line);
+    }
+    co_return;
+}
+
+
 void process_fastq(const string& fastq_file, const string& index_dir, int concurrency) {
     MoviOptions movi_options;
     movi_options.set_index_dir(index_dir);
-    movi_options.set_pml(); // Enable PML mode
-    
+    if (g_mem_query) {
+        movi_options.set_mem();
+        movi_options.set_ftab_k(static_cast<uint32_t>(g_ftab_k));
+        movi_options.set_min_mem_length(static_cast<uint32_t>(g_min_mem_length));
+        movi_options.set_multi_ftab(false);
+    } else if (g_kmer_query) {
+        movi_options.set_kmer();
+        movi_options.set_kmer_count(g_kmer_count);
+        movi_options.set_k(static_cast<uint32_t>(g_k));
+        movi_options.set_ftab_k(static_cast<uint32_t>(g_ftab_k));
+        movi_options.set_multi_ftab(false);
+    } else {
+        movi_options.set_pml(); // Enable PML mode
+    }
+
     MoveStructure mv(&movi_options);
     mv.deserialize();
+    if ((g_mem_query && g_ftab_k > 0) || (g_kmer_query && g_ftab_k > 1)) mv.read_ftab();
     fprintf(stderr_buf, "Successfully loaded Movi index from: %s\n", index_dir.c_str());
-    
-    if (g_bpf_output) {
-        BPFHeader header;
-        header.init(16);  // matching lengths are stored as 16-bit values
-        fwrite(&header, sizeof(header), 1, stdout_buf);
-    } else {
-        fprintf(stdout_buf, "# Read_ID PML_Values\n");
+
+    // PML/text/BPF header only applies to the PML output; MEM and k-mer emit
+    // their own tab-delimited lines with no header.
+    if (!g_mem_query && !g_kmer_query) {
+        if (g_bpf_output) {
+            BPFHeader header;
+            header.init(16);  // matching lengths are stored as 16-bit values
+            fwrite(&header, sizeof(header), 1, stdout_buf);
+        } else {
+            fprintf(stdout_buf, "# Read_ID PML_Values\n");
+        }
     }
     g_emitter.ordered = g_ordered_output;
     
@@ -610,9 +1056,13 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     
     // Initialize all coroutines - use move semantics
     for (int i = 0; i < concurrency; ++i) {
-        coroutines.push_back(std::move(mv.query_pml_coroutine(reader, waiting_handles[i], i)));
-        // Resume coroutines initially to get them started
-        // They start suspended, so we need to resume them to begin execution
+        if (g_mem_query)
+            coroutines.push_back(std::move(mv.query_mem_coroutine(reader, waiting_handles[i], i)));
+        else if (g_kmer_query)
+            coroutines.push_back(std::move(mv.query_kmer_coroutine(reader, waiting_handles[i], i)));
+        else
+            coroutines.push_back(std::move(mv.query_pml_coroutine(reader, waiting_handles[i], i)));
+        // They start suspended, so resume to begin execution.
         if (coroutines[i].coro) {
             coroutines[i].coro.resume();
         }
@@ -640,8 +1090,16 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
                 if (reader.serve_next(i)) {
                     total_bases += reader.slot(i).sequence.length();
                 }
-                waiting_handles[i].resume();
+                // Clear the slot BEFORE resuming. If the coroutine finishes this
+                // read without ever hitting co_yield (e.g. a read shorter than k,
+                // which skips the whole search), it will loop straight back to
+                // co_await and re-register its handle here during the resume();
+                // clearing after the resume would clobber that fresh await and the
+                // coroutine would be resumed next iteration with no new read served
+                // -- re-processing the moved-from (empty) slot as a phantom record.
+                auto h = waiting_handles[i];
                 waiting_handles[i] = nullptr;
+                h.resume();
                 if (!coroutines[i].is_done()) {
                     active_coroutines++;
                 }
@@ -681,10 +1139,13 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
 }
 
 void print_usage(const char* program_name) {
-    fprintf(stderr_buf, "Usage: %s [--debug] [--bpf] [--reorder] <fastq_file> <index_dir> [concurrency]\n", program_name);
+    fprintf(stderr_buf, "Usage: %s [--debug] [--bpf] [--reorder] [query opts] <fastq_file> <index_dir> [concurrency]\n", program_name);
     fprintf(stderr_buf, "  --debug:     Enable debug output\n");
     fprintf(stderr_buf, "  --bpf:       Write binary BPF output (like mainline Movi) instead of text\n");
     fprintf(stderr_buf, "  --reorder:   Emit reads in input order (enable the reorder buffer; default is completion order)\n");
+    fprintf(stderr_buf, "  --mem --ftab-k N --min-mem-length N:  MEM query mode\n");
+    fprintf(stderr_buf, "  --kmer | --kmer-count, -k/--k-length N [--ftab-k N]:  k-mer query mode\n");
+    fprintf(stderr_buf, "               (default query mode is PML)\n");
     fprintf(stderr_buf, "  fastq_file: Input FASTQ file with reads\n");
     fprintf(stderr_buf, "  index_dir:  Directory containing the Movi index\n");
     fprintf(stderr_buf, "  concurrency: Number of concurrent coroutines (default: 1)\n");
@@ -700,15 +1161,33 @@ int main(int argc, char* argv[]) {
     int arg_idx = 1;
 
     // Parse leading flags (--debug, --bpf) in any order.
-    while (arg_idx < argc && string(argv[arg_idx]).rfind("--", 0) == 0) {
+    // Accept both long (--foo) and short (-k) option flags; a positional (fastq
+    // path or concurrency) never starts with '-'.
+    while (arg_idx < argc && argv[arg_idx][0] == '-' && string(argv[arg_idx]) != "-") {
         string flag = argv[arg_idx];
         if (flag == "--debug") { debug_enabled = true; }
         else if (flag == "--bpf") { g_bpf_output = true; }
         else if (flag == "--reorder") { g_ordered_output = true; }
+        else if (flag == "--mem") { g_mem_query = true; }
+        else if (flag == "--kmer") { g_kmer_query = true; }
+        else if (flag == "--kmer-count") { g_kmer_query = true; g_kmer_count = true; }
+        else if (flag == "-k" || flag == "--k-length") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_k = std::stoi(argv[++arg_idx]); }
+        else if (flag == "--ftab-k") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_ftab_k = std::stoi(argv[++arg_idx]); }
+        else if (flag == "--min-mem-length") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_min_mem_length = std::stoi(argv[++arg_idx]); }
         else { fprintf(stderr_buf, "Unknown flag: %s\n", flag.c_str()); print_usage(argv[0]); return 1; }
         arg_idx++;
     }
-    
+
+    // Validate query-mode flag combinations.
+    if (g_mem_query && g_kmer_query) {
+        fprintf(stderr_buf, "Error: --mem and --kmer/--kmer-count are mutually exclusive\n");
+        return 1;
+    }
+    if (g_kmer_query && g_k < 1) {
+        fprintf(stderr_buf, "Error: --kmer/--kmer-count requires -k/--k-length N (N >= 1)\n");
+        return 1;
+    }
+
     // Check remaining arguments
     if (argc - arg_idx < 2 || argc - arg_idx > 3) {
         fprintf(stderr_buf, "argc = %d\n", argc);

@@ -154,9 +154,22 @@ class MoveStructure {
         uint64_t query_pml(MoveQuery& mq);
         uint64_t query_zml(MoveQuery& mq);
 
-        // C++20 coroutine version of query_pml (latency-hiding style (c); see movi_co.cpp)
+        // C++20 coroutine versions of the queries (latency-hiding style (c); see movi_co.cpp).
+        // All three share one return type and the scheduler scaffolding.
         struct query_pml_coroutine_return_type;
         query_pml_coroutine_return_type query_pml_coroutine(
+            SharedFastqReader& reader,
+            std::coroutine_handle<>& my_handle_storage,
+            int coroutine_id);
+
+        // Coroutine MEM query (bidirectional); mirrors query_mems / query_mem_bml.
+        query_pml_coroutine_return_type query_mem_coroutine(
+            SharedFastqReader& reader,
+            std::coroutine_handle<>& my_handle_storage,
+            int coroutine_id);
+
+        // Coroutine k-mer query (--kmer / --kmer-count); mirrors query_all_kmers.
+        query_pml_coroutine_return_type query_kmer_coroutine(
             SharedFastqReader& reader,
             std::coroutine_handle<>& my_handle_storage,
             int coroutine_id);
