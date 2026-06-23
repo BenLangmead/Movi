@@ -455,7 +455,7 @@ class MoveStructure {
         uint64_t kmerbv_num_kmers = 0;
         // Full backward search of a k-mer string; returns its BWT interval (empty if
         // absent). Used by the canonical-id lookup to locate rc(x)'s interval.
-        MoveInterval search_kmer_interval(const std::string& s);
+        MoveInterval search_kmer_interval(std::string s);  // by value: check_alphabet takes char&
 
         // Run-local (all_p-free) k-mer count structure. A k-mer's count is
         // resolved from Movi's run lengths plus a per-run record of which run heads

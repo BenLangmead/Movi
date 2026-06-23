@@ -257,7 +257,7 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
 // BWT interval, or an empty interval if s does not occur. Mirrors the per-base
 // left-extension the build DFS uses. Used to locate rc(x)'s interval for the
 // canonical-id lookup (id = rank(min(lb(x), lb(rc(x))))).
-MoveInterval MoveStructure::search_kmer_interval(const std::string& s) {
+MoveInterval MoveStructure::search_kmer_interval(std::string s) {
     MoveInterval iv;
     int n = static_cast<int>(s.size());
     if (n == 0 || !check_alphabet(s[n - 1])) { iv.make_empty(); return iv; }
