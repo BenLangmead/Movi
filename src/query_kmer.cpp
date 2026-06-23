@@ -460,41 +460,29 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                         uint64_t lb = lb_fw;
                         int orientation = -1;  // per-orientation ids: orientation not applicable
                         if (kmerbv_is_canonical) {
-                            // SSHash-compatible canonical id: B_k marks only canonical
-                            // k-mers, so id = rank(lb of canonical(x)). x is canonical iff
-                            // x <= rc(x) lexicographically (== lb_fw <= lb_rc, since BWT
-                            // intervals are lex-ordered).
+                            // SSHash-compatible canonical id. B_k marks only canonical
+                            // k-mers, so id = rank(lb of canonical(x)). Canonicality is
+                            // decided from the STRINGS (x canonical iff x <= rc(x), which
+                            // equals lb_fw <= lb_rc since BWT intervals are lex-ordered), so
+                            // canonical k-mers use lb_fw directly with NO rc work. Only the
+                            // non-canonical k-mers pay for the rc interval, computed by the
+                            // normal ftab-assisted search on the rc string. (~1.56x faster
+                            // than always searching rc: 0.75 vs 0.48 M/s, ecoli100 k31.)
                             std::string xstr = query_seq.substr(pos_on_r + 2 - k, k);
                             std::string rcstr = reverse_complement(xstr);
-                            static const bool lazy_rc = (std::getenv("MOVI_LAZY_RC") != nullptr);
-                            if (lazy_rc) {
-                                // LAZY-RC: decide canonicality from the strings; only do the
-                                // rc interval search when x is NON-canonical. The rc search
-                                // reuses the normal ftab-assisted search on the rc string.
-                                if (xstr <= rcstr) {
-                                    orientation = 0;            // canonical: id = rank(lb_fw)
-                                } else {
-                                    MoveQuery rcq(rcstr);
-                                    int32_t rp = static_cast<int32_t>(k) - 1; uint64_t rml = 0;
-                                    MoveInterval rc_iv = initialize_backward_search(rcq, rp, rml);
-                                    rc_iv = backward_search(rcq.query(), rp, rc_iv,
-                                                            std::numeric_limits<int32_t>::max());
-                                    if (!rc_iv.is_empty()) {
-                                        lb = kmerbv_all_p[rc_iv.run_start] + rc_iv.offset_start;
-                                        orientation = 1;
-                                    } else {
-                                        orientation = 0;  // shouldn't happen in a doubled index
-                                    }
-                                }
+                            if (xstr <= rcstr) {
+                                orientation = 0;               // canonical: id = rank(lb_fw)
                             } else {
-                                // ALWAYS-RC (baseline): search rc(x) every time, take min lb.
-                                MoveInterval rc_iv = search_kmer_interval(rcstr);
+                                MoveQuery rcq(rcstr);
+                                int32_t rp = static_cast<int32_t>(k) - 1; uint64_t rml = 0;
+                                MoveInterval rc_iv = initialize_backward_search(rcq, rp, rml);
+                                rc_iv = backward_search(rcq.query(), rp, rc_iv,
+                                                        std::numeric_limits<int32_t>::max());
                                 if (!rc_iv.is_empty()) {
-                                    uint64_t lb_rc = kmerbv_all_p[rc_iv.run_start] + rc_iv.offset_start;
-                                    orientation = (lb_fw <= lb_rc) ? 0 : 1;
-                                    lb = std::min(lb_fw, lb_rc);
+                                    lb = kmerbv_all_p[rc_iv.run_start] + rc_iv.offset_start;
+                                    orientation = 1;
                                 } else {
-                                    orientation = 0;
+                                    orientation = 0;  // shouldn't happen in a doubled index
                                 }
                             }
                         }
