@@ -1,4 +1,5 @@
-#include <sys/stat.h> 
+#include <sys/stat.h>
+#include <cstdlib>
 
 #include "move_structure.hpp"
 #include "utils.hpp"
@@ -461,19 +462,40 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                         if (kmerbv_is_canonical) {
                             // SSHash-compatible canonical id: B_k marks only canonical
                             // k-mers, so id = rank(lb of canonical(x)). x is canonical iff
-                            // lb(x) <= lb(rc(x)) (BWT intervals are lex-ordered), so
-                            // id = rank(min(lb_fw, lb_rc)) and orientation = forward iff
-                            // lb_fw <= lb_rc. (Correctness path: search rc(x) explicitly;
-                            // the bidirectional fast path reuses rc_interval.)
+                            // x <= rc(x) lexicographically (== lb_fw <= lb_rc, since BWT
+                            // intervals are lex-ordered).
                             std::string xstr = query_seq.substr(pos_on_r + 2 - k, k);
                             std::string rcstr = reverse_complement(xstr);
-                            MoveInterval rc_iv = search_kmer_interval(rcstr);
-                            if (!rc_iv.is_empty()) {
-                                uint64_t lb_rc = kmerbv_all_p[rc_iv.run_start] + rc_iv.offset_start;
-                                orientation = (lb_fw <= lb_rc) ? 0 : 1;
-                                lb = std::min(lb_fw, lb_rc);
+                            static const bool lazy_rc = (std::getenv("MOVI_LAZY_RC") != nullptr);
+                            if (lazy_rc) {
+                                // LAZY-RC: decide canonicality from the strings; only do the
+                                // rc interval search when x is NON-canonical. The rc search
+                                // reuses the normal ftab-assisted search on the rc string.
+                                if (xstr <= rcstr) {
+                                    orientation = 0;            // canonical: id = rank(lb_fw)
+                                } else {
+                                    MoveQuery rcq(rcstr);
+                                    int32_t rp = static_cast<int32_t>(k) - 1; uint64_t rml = 0;
+                                    MoveInterval rc_iv = initialize_backward_search(rcq, rp, rml);
+                                    rc_iv = backward_search(rcq.query(), rp, rc_iv,
+                                                            std::numeric_limits<int32_t>::max());
+                                    if (!rc_iv.is_empty()) {
+                                        lb = kmerbv_all_p[rc_iv.run_start] + rc_iv.offset_start;
+                                        orientation = 1;
+                                    } else {
+                                        orientation = 0;  // shouldn't happen in a doubled index
+                                    }
+                                }
                             } else {
-                                orientation = 0;  // rc absent (shouldn't happen in a doubled index)
+                                // ALWAYS-RC (baseline): search rc(x) every time, take min lb.
+                                MoveInterval rc_iv = search_kmer_interval(rcstr);
+                                if (!rc_iv.is_empty()) {
+                                    uint64_t lb_rc = kmerbv_all_p[rc_iv.run_start] + rc_iv.offset_start;
+                                    orientation = (lb_fw <= lb_rc) ? 0 : 1;
+                                    lb = std::min(lb_fw, lb_rc);
+                                } else {
+                                    orientation = 0;
+                                }
                             }
                         }
                         uint64_t kmer_id = kmerbv_rank1(lb);
