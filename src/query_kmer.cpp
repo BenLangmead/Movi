@@ -457,18 +457,23 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                     if (found_kmer_count > 0 && !interval.is_empty()) {
                         uint64_t lb_fw = kmerbv_all_p[interval.run_start] + interval.offset_start;
                         uint64_t lb = lb_fw;
+                        int orientation = -1;  // per-orientation ids: orientation not applicable
                         if (kmerbv_is_canonical) {
                             // SSHash-compatible canonical id: B_k marks only canonical
                             // k-mers, so id = rank(lb of canonical(x)). x is canonical iff
                             // lb(x) <= lb(rc(x)) (BWT intervals are lex-ordered), so
-                            // id = rank(min(lb_fw, lb_rc)). (Correctness path: search rc(x)
-                            // explicitly; the bidirectional fast path reuses rc_interval.)
+                            // id = rank(min(lb_fw, lb_rc)) and orientation = forward iff
+                            // lb_fw <= lb_rc. (Correctness path: search rc(x) explicitly;
+                            // the bidirectional fast path reuses rc_interval.)
                             std::string xstr = query_seq.substr(pos_on_r + 2 - k, k);
                             std::string rcstr = reverse_complement(xstr);
                             MoveInterval rc_iv = search_kmer_interval(rcstr);
                             if (!rc_iv.is_empty()) {
                                 uint64_t lb_rc = kmerbv_all_p[rc_iv.run_start] + rc_iv.offset_start;
+                                orientation = (lb_fw <= lb_rc) ? 0 : 1;
                                 lb = std::min(lb_fw, lb_rc);
+                            } else {
+                                orientation = 0;  // rc absent (shouldn't happen in a doubled index)
                             }
                         }
                         uint64_t kmer_id = kmerbv_rank1(lb);
@@ -477,7 +482,7 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                         // Pass found_kmer_count for the presence tally and occ_count as
                         // the displayed multiplicity.
                         uint64_t occ_count = interval.count(rlbwt);
-                        mq.add_kmer(pos_on_r + 2 - k, found_kmer_count, kmer_id, occ_count);
+                        mq.add_kmer(pos_on_r + 2 - k, found_kmer_count, kmer_id, occ_count, orientation);
                     } else {
                         mq.add_kmer(pos_on_r + 2 - k, found_kmer_count);
                     }

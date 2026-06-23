@@ -16,9 +16,15 @@ class MoveQuery {
         // printed in the per-k-mer count field instead of kmer_count — used by
         // the --kmer-bv path to show the true occurrence multiplicity while
         // still counting presence one k-mer at a time.
+        // orientation: -1 = unknown/not-applicable (per-orientation ids); 0 = the
+        // query k-mer is the canonical (forward) one; 1 = the query k-mer is the
+        // reverse complement of the canonical k-mer that owns the id. When set, it
+        // is emitted as a 4th field (':f' / ':r'), matching SSHash's
+        // lookup_result.kmer_orientation.
         void add_kmer(int32_t pos_on_r, uint64_t kmer_count,
                       uint64_t kmer_id = std::numeric_limits<uint64_t>::max(),
-                      uint64_t display_count = std::numeric_limits<uint64_t>::max()) {
+                      uint64_t display_count = std::numeric_limits<uint64_t>::max(),
+                      int orientation = -1) {
             if (kmer_count > 0) {
                 found_kmer_count += kmer_count;
                 uint64_t shown = (display_count != std::numeric_limits<uint64_t>::max())
@@ -26,7 +32,10 @@ class MoveQuery {
                 if (kmer_id != std::numeric_limits<uint64_t>::max()) {
                     matching_lengths_string += std::to_string(pos_on_r) + ":" +
                                                std::to_string(shown) + ":" +
-                                               std::to_string(kmer_id) + " ";
+                                               std::to_string(kmer_id);
+                    if (orientation >= 0)
+                        matching_lengths_string += (orientation == 0 ? ":f" : ":r");
+                    matching_lengths_string += " ";
                 } else {
                     matching_lengths_string += std::to_string(pos_on_r) + ":" +
                                                std::to_string(shown) + " ";
