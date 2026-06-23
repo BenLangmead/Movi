@@ -253,6 +253,22 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
     }
 }
 
+// Full backward search of k-mer string s over the (doubled) BWT; returns s's
+// BWT interval, or an empty interval if s does not occur. Mirrors the per-base
+// left-extension the build DFS uses. Used to locate rc(x)'s interval for the
+// canonical-id lookup (id = rank(min(lb(x), lb(rc(x))))).
+MoveInterval MoveStructure::search_kmer_interval(const std::string& s) {
+    MoveInterval iv;
+    int n = static_cast<int>(s.size());
+    if (n == 0 || !check_alphabet(s[n - 1])) { iv.make_empty(); return iv; }
+    uint64_t ci = alphamap[static_cast<uint64_t>(s[n - 1])] + 1;
+    iv = MoveInterval(first_runs[ci], first_offsets[ci], last_runs[ci], last_offsets[ci]);
+    for (int i = n - 2; i >= 0; --i) {
+        if (!backward_search_step(s[i], iv)) { iv.make_empty(); return iv; }
+    }
+    return iv;
+}
+
 void MoveStructure::load_kmerbv(uint32_t k) {
     std::string index_dir = movi_options->get_index_dir();
     std::string ks_       = std::to_string(k);
@@ -282,6 +298,12 @@ void MoveStructure::load_kmerbv(uint32_t k) {
         sdsl::load_from_file(kmerbv_rank, rank_path);
         kmerbv_rank.set_vector(&kmerbv);
     }
+
+    // Read the id-space metadata (canonical flag + num_kmers). In canonical mode
+    // the query must canonicalize each k-mer (the lookup uses rank(min(lb_fw,lb_rc))).
+    kmerbv_is_canonical = false; kmerbv_num_kmers = 0;
+    std::ifstream meta(index_dir + "/kmerbv." + ks_ + ".meta");
+    if (meta) { int c = 0; meta >> c >> kmerbv_num_kmers; kmerbv_is_canonical = (c == 1); }
 
     // Run-local (all_p-free) count structure: per-run interior offsets + the
     // run-head exception/has-interior flags. kmer_count_from_bv resolves a

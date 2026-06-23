@@ -449,6 +449,13 @@ class MoveStructure {
         inline uint64_t kmerbv_rank1(uint64_t lb) {
             return kmerbv_use_sd ? kmerbv_sd_rank(lb) : kmerbv_rank(lb);
         }
+        // From kmerbv.<k>.meta: whether B_k marks only CANONICAL k-mers (ids in
+        // [0,num_kmers), SSHash-compatible) and the num_kmers (= ones in B_k).
+        bool kmerbv_is_canonical = false;
+        uint64_t kmerbv_num_kmers = 0;
+        // Full backward search of a k-mer string; returns its BWT interval (empty if
+        // absent). Used by the canonical-id lookup to locate rc(x)'s interval.
+        MoveInterval search_kmer_interval(const std::string& s);
 
         // Run-local (all_p-free) k-mer count structure. A k-mer's count is
         // resolved from Movi's run lengths plus a per-run record of which run heads

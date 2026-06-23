@@ -455,7 +455,22 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                     MoveInterval interval;
                     uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r, /*single=*/true, &interval);
                     if (found_kmer_count > 0 && !interval.is_empty()) {
-                        uint64_t lb = kmerbv_all_p[interval.run_start] + interval.offset_start;
+                        uint64_t lb_fw = kmerbv_all_p[interval.run_start] + interval.offset_start;
+                        uint64_t lb = lb_fw;
+                        if (kmerbv_is_canonical) {
+                            // SSHash-compatible canonical id: B_k marks only canonical
+                            // k-mers, so id = rank(lb of canonical(x)). x is canonical iff
+                            // lb(x) <= lb(rc(x)) (BWT intervals are lex-ordered), so
+                            // id = rank(min(lb_fw, lb_rc)). (Correctness path: search rc(x)
+                            // explicitly; the bidirectional fast path reuses rc_interval.)
+                            std::string xstr = query_seq.substr(pos_on_r + 2 - k, k);
+                            std::string rcstr = reverse_complement(xstr);
+                            MoveInterval rc_iv = search_kmer_interval(rcstr);
+                            if (!rc_iv.is_empty()) {
+                                uint64_t lb_rc = kmerbv_all_p[rc_iv.run_start] + rc_iv.offset_start;
+                                lb = std::min(lb_fw, lb_rc);
+                            }
+                        }
                         uint64_t kmer_id = kmerbv_rank1(lb);
                         // The BWT interval size is the k-mer's occurrence count on the
                         // doubled (fwd+rc) text = occ(x)+occ(rc(x)) = KMC canonical count.
