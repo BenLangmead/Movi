@@ -171,18 +171,21 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
     std::string index_dir = movi_options->get_index_dir();
     for (uint32_t k : ks) {
         std::string ks_ = std::to_string(k);
-        // Dense-id bitvector (lb only) + rank.
+        // MPHF-id structure for B_k. The sparse Elias-Fano sd_vector is the default
+        // (far smaller than dense bv+rank since B_k is sparse, and competitive with
+        // SSHash). The dense bit_vector+rank is ~6% faster at query but ~4-5x larger;
+        // it is only written with --id-bv-dense (for benchmarking / max speed).
         sdsl::bit_vector& bv = bvs.at(k);
         sdsl::rank_support_v<> rank_bv(&bv);
-        uint64_t ones = rank_bv(bv.size());
-        sdsl::store_to_file(bv,      index_dir + "/kmerbv." + ks_ + ".bv");
-        sdsl::store_to_file(rank_bv, index_dir + "/kmerbv." + ks_ + ".rank");
-        // Sparse (Elias-Fano) B_k: usually far smaller than bv+rank (B_k is sparse),
-        // and competitive with SSHash. Used at query via MOVI_ID_BV=sd.
+        uint64_t ones = rank_bv(bv.size());          // = num_kmers (rank not stored unless --id-bv-dense)
         sdsl::sd_vector<> sdb(bv);
         sdsl::store_to_file(sdb, index_dir + "/kmerbv." + ks_ + ".sd");
-        uint64_t sz_dense = sdsl::size_in_bytes(bv) + sdsl::size_in_bytes(rank_bv);
         uint64_t sz_sd    = sdsl::size_in_bytes(sdb);
+        uint64_t sz_dense = sdsl::size_in_bytes(bv) + sdsl::size_in_bytes(rank_bv);
+        if (movi_options->is_kmerbv_id_dense()) {
+            sdsl::store_to_file(bv,      index_dir + "/kmerbv." + ks_ + ".bv");
+            sdsl::store_to_file(rank_bv, index_dir + "/kmerbv." + ks_ + ".rank");
+        }
 
         // Run-local (all_p-free) count structure derived from C_k. Decompose the
         // group-starts relative to Movi's run heads (which come for free from the
@@ -241,38 +244,36 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
         }
 
         INFO_MSG("k=" + ks_ + ": num_kmers=" + std::to_string(ones) + " distinct " +
-                 (canonical ? "CANONICAL " : "") + "k-mers; B_k id rep: dense(bv+rank)=" +
-                 std::to_string(sz_dense / 1048576) + "MB, sd_vector=" +
+                 (canonical ? "CANONICAL " : "") + "k-mers; B_k id sd_vector=" +
                  std::to_string(sz_sd / 1048576) + "MB (" +
                  std::to_string(sz_dense ? (100 * sz_sd / sz_dense) : 0) +
-                 "% of dense); written to " + index_dir + "/kmerbv." + ks_ +
-                 ".{bv,rank,sd,cnt.*,meta}");
+                 "% of dense bv+rank=" + std::to_string(sz_dense / 1048576) + "MB" +
+                 (movi_options->is_kmerbv_id_dense() ? ", dense also written" : "") +
+                 "); k-mer files at " + index_dir + "/kmerbv." + ks_ + ".*");
     }
 }
 
 void MoveStructure::load_kmerbv(uint32_t k) {
     std::string index_dir = movi_options->get_index_dir();
-    std::string bv_path   = index_dir + "/kmerbv." + std::to_string(k) + ".bv";
-    std::string rank_path = index_dir + "/kmerbv." + std::to_string(k) + ".rank";
+    std::string ks_       = std::to_string(k);
+    std::string bv_path   = index_dir + "/kmerbv." + ks_ + ".bv";
+    std::string rank_path = index_dir + "/kmerbv." + ks_ + ".rank";
+    std::string sd_path   = index_dir + "/kmerbv." + ks_ + ".sd";
 
-    if (!std::filesystem::exists(bv_path)) {
-        throw std::runtime_error(
-            ERROR_MSG("K-mer bitvector for k=" + std::to_string(k) +
-                      " not found at " + bv_path +
-                      ". Run 'movi build-kmerbv --index <dir> --kmer-lengths " +
-                      std::to_string(k) + "' first."));
-    }
-
-    // MPHF-id B_k representation: dense bit_vector+rank (default) or sparse
-    // Elias-Fano sd_vector (MOVI_ID_BV=sd) -- the sd rep is ~4x smaller on disk and
-    // competitive with SSHash, at a modest rank-speed cost. rank routes via kmerbv_rank1().
+    // MPHF-id B_k representation. Default: sparse Elias-Fano sd_vector (small,
+    // SSHash-competitive). MOVI_ID_BV=dense forces the dense bit_vector+rank rep
+    // (~6% faster query, ~4-5x larger; only present if built with --id-bv-dense).
     const char* idbv_env = std::getenv("MOVI_ID_BV");
-    kmerbv_use_sd = (idbv_env != nullptr && std::string(idbv_env) == "sd");
+    bool want_dense = (idbv_env != nullptr && std::string(idbv_env) == "dense");
+    bool sd_ok = std::filesystem::exists(sd_path);
+    bool dense_ok = std::filesystem::exists(bv_path);
+    if (!sd_ok && !dense_ok) {
+        throw std::runtime_error(
+            ERROR_MSG("K-mer id bitvector for k=" + ks_ + " not found at " + sd_path +
+                      ". Run 'movi build-kmerbv --index <dir> --kmer-lengths " + ks_ + "' first."));
+    }
+    kmerbv_use_sd = sd_ok && !(want_dense && dense_ok);
     if (kmerbv_use_sd) {
-        std::string sd_path = index_dir + "/kmerbv." + std::to_string(k) + ".sd";
-        if (!std::filesystem::exists(sd_path))
-            throw std::runtime_error(ERROR_MSG("MOVI_ID_BV=sd but " + sd_path +
-                " is missing; rebuild with this build-kmerbv (it writes .sd)."));
         sdsl::load_from_file(kmerbv_sd, sd_path);
         kmerbv_sd_rank = sdsl::sd_vector<>::rank_1_type(&kmerbv_sd);
         kmerbv_sd_sel  = sdsl::sd_vector<>::select_1_type(&kmerbv_sd);
