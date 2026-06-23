@@ -198,6 +198,7 @@ class MoveStructure {
         uint64_t query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single = false,
                                   MoveInterval* interval_out = nullptr);
         uint64_t query_kmers_count_bv(MoveQuery& mq, int32_t& pos_on_r);
+        uint64_t query_kmers_id_bv(MoveQuery& mq, int32_t& pos_on_r);
 /*******  End of functions implemented in query_kmer.cpp  ***********/
 /***************************************************************************/
 
