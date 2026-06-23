@@ -447,21 +447,31 @@ class MoveStructure {
         sdsl::sd_vector<> kmerbv_sd;
         sdsl::sd_vector<>::rank_1_type kmerbv_sd_rank;
         sdsl::sd_vector<>::select_1_type kmerbv_sd_sel;
-        // Stride for the sd-vector address space: each B_k mark at row (run,offset)
-        // is placed at run*kmerbv_L + offset instead of its absolute BWT row. Since
-        // rows are <= L after length-splitting (L = MAX_RUN_LENGTH), this is an
-        // injective, order-preserving address with no per-run position table -- it
-        // eliminates kmerbv_all_p (~r*log2(n) bits) at the cost of a slightly larger
-        // sd universe (r*L vs n; sd cost only grows as log2(universe/m)). Set from
-        // the .meta sidecar at load. The dense rep keeps absolute-row addressing.
-        uint64_t kmerbv_L = 0;
-        // MPHF id of the k-mer whose interval starts at (run, offset). id =
-        // rank(addr+1)-1 holds for an exact OR a subset interval (the k-mer's mark
-        // is the only 1 in its group). sd: addr = run*L+offset (no all_p); dense:
-        // addr = all_p[run]+offset (absolute row).
+        // Sampled per-run absolute-position checkpoints for the MPHF id query. Both
+        // the sd and dense B_k reps mark ABSOLUTE BWT rows, so id = rank(lb+1)-1 with
+        // lb = all_p[run] + offset. Materializing the full per-run all_p costs
+        // ~r*log2(n) bits (~ a whole SSHash index); instead we store one checkpoint
+        // every kmerbv_allp_S runs and recover an exact run-head position by summing
+        // the move structure's run lengths (get_n, already in RAM) from the nearest
+        // checkpoint -- a bounded O(kmerbv_allp_S) walk, paid once per present k-mer
+        // (not per LF step). Trades a sampled-position RSS factor for that walk.
+        sdsl::int_vector<> kmerbv_allp_ckpt;   // all_p at runs 0, S, 2S, ... (sampled)
+        uint64_t kmerbv_allp_S = 0;            // checkpoint stride in runs; 0 => not built
+        // Exact absolute row of run head `run` = nearest checkpoint + sum of the
+        // intervening run lengths.
+        inline uint64_t reconstruct_allp(uint64_t run) {
+            uint64_t base = run - (run % kmerbv_allp_S);
+            uint64_t p = kmerbv_allp_ckpt[run / kmerbv_allp_S];
+            for (uint64_t j = base; j < run; ++j) p += get_n(j);
+            return p;
+        }
+        // MPHF id of the k-mer whose interval starts at (run, offset): id =
+        // rank(lb+1)-1 with lb = all_p[run]+offset. Holds for an exact OR a subset
+        // interval (the k-mer's mark is the only 1 in its group).
         inline uint64_t kmerbv_id(uint64_t run, uint64_t offset) {
-            if (kmerbv_use_sd) return kmerbv_sd_rank(run * kmerbv_L + offset + 1) - 1;
-            return kmerbv_rank(kmerbv_all_p[run] + offset + 1) - 1;
+            uint64_t lb = reconstruct_allp(run) + offset;
+            return kmerbv_use_sd ? (kmerbv_sd_rank(lb + 1) - 1)
+                                 : (kmerbv_rank(lb + 1) - 1);
         }
         // From kmerbv.<k>.meta: whether B_k marks only CANONICAL k-mers (ids in
         // [0,num_kmers), SSHash-compatible) and the num_kmers (= ones in B_k).
@@ -479,11 +489,6 @@ class MoveStructure {
         // an n-space count bitvector -- plain bit_vector, sd_vector, rrr_vector, and
         // a run-heads + Gi + E hybrid -- to map the space/speed frontier; this
         // run-local form was both smallest and fastest, so it is the only one kept.)
-        //
-        // kmerbv_all_p: bit-packed per-run absolute rows (width ceil(log2 n)), built
-        // at load ONLY for the MPHF id query (--kmer --kmer-bv) to form
-        // lb = kmerbv_all_p[run] + offset for rank(lb) on B_k; the count needs none.
-        sdsl::int_vector<> kmerbv_all_p;
         sdsl::bit_vector kmerbv_ex;  // ex[run] = 1 iff that run head is not a group-start
         sdsl::bit_vector kmerbv_hi;  // hi[run] = 1 iff that run contains an interior group-start
         // Per-run (all_p-free) interior group-starts. The per-entry offsets are

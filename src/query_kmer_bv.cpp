@@ -178,24 +178,15 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
         sdsl::bit_vector& bv = bvs.at(k);
         sdsl::rank_support_v<> rank_bv(&bv);
         uint64_t ones = rank_bv(bv.size());          // = num_kmers
-        // Stride-addressed sparse B_k: address each mark as run*L + offset (L =
-        // MAX_RUN_LENGTH, the length-split bound) rather than its absolute BWT row.
-        // This eliminates the per-run absolute-position table (kmerbv_all_p,
-        // ~r*log2(n) bits ~ a whole SSHash index) at query: lb = run*L + offset is
-        // pure arithmetic. Universe grows from n to r*L, but sd_vector cost scales
-        // with log2(universe/m), so the few extra bits/mark are far cheaper than
-        // all_p. Built directly via sd_vector_builder (a dense bit_vector over r*L
-        // would be huge); set() is monotonic in p so the addresses are increasing.
-        const uint64_t L = MAX_RUN_LENGTH;
-        const uint64_t U = static_cast<uint64_t>(r) * L;
-        sdsl::sd_vector_builder builder(U, ones);
-        {
-            uint64_t run = 0;
-            for (uint64_t p = 0; p < length; ++p) {
-                while (run + 1 < all_p.size() and all_p[run + 1] <= p) run++;
-                if (bv[p]) builder.set(run * L + (p - all_p[run]));
-            }
-        }
+        // Sparse (Elias-Fano) B_k over ABSOLUTE BWT rows: universe = n (length),
+        // each mark set at its absolute row p. This is the smallest on-disk rep; the
+        // per-run base position needed to address it at query (lb = all_p[run]+offset)
+        // is reconstructed from sampled checkpoints + run lengths at load time (see
+        // reconstruct_allp / load_kmerbv), so the full all_p table is never stored.
+        // Built via sd_vector_builder since p is strictly increasing.
+        sdsl::sd_vector_builder builder(length, ones);
+        for (uint64_t p = 0; p < length; ++p)
+            if (bv[p]) builder.set(p);
         sdsl::sd_vector<> sdb(builder);
         sdsl::store_to_file(sdb, index_dir + "/kmerbv." + ks_ + ".sd");
         uint64_t sz_sd    = sdsl::size_in_bytes(sdb);
@@ -258,9 +249,8 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
         // Sidecar metadata so the query / access side knows the id space:
         //   line 1: canonical flag (0|1);  line 2: num_kmers (= ones).
         {
-            // line1: canonical flag; line2: num_kmers; line3: L (sd address stride)
             std::ofstream meta(index_dir + "/kmerbv." + ks_ + ".meta");
-            meta << (canonical ? 1 : 0) << "\n" << ones << "\n" << L << "\n";
+            meta << (canonical ? 1 : 0) << "\n" << ones << "\n";
         }
 
         INFO_MSG("k=" + ks_ + ": num_kmers=" + std::to_string(ones) + " distinct " +
@@ -319,11 +309,12 @@ void MoveStructure::load_kmerbv(uint32_t k) {
         kmerbv_rank.set_vector(&kmerbv);
     }
 
-    // Read the id-space metadata (canonical flag + num_kmers + L). In canonical
-    // mode the query canonicalizes each k-mer; L is the sd address stride.
-    kmerbv_is_canonical = false; kmerbv_num_kmers = 0; kmerbv_L = 0;
+    // Read the id-space metadata (canonical flag + num_kmers). In canonical mode
+    // the query canonicalizes each k-mer before the id lookup. (Older indexes wrote
+    // a 3rd line, a now-unused sd stride; it is simply ignored.)
+    kmerbv_is_canonical = false; kmerbv_num_kmers = 0;
     std::ifstream meta(index_dir + "/kmerbv." + ks_ + ".meta");
-    if (meta) { int c = 0; meta >> c >> kmerbv_num_kmers >> kmerbv_L; kmerbv_is_canonical = (c == 1); }
+    if (meta) { int c = 0; meta >> c >> kmerbv_num_kmers; kmerbv_is_canonical = (c == 1); }
 
     // Run-local (all_p-free) count structure: per-run interior offsets + the
     // run-head exception/has-interior flags. kmer_count_from_bv resolves a
@@ -337,16 +328,27 @@ void MoveStructure::load_kmerbv(uint32_t k) {
     kmerbv_hi_ones = kmerbv_hi_rank(kmerbv_hi.size());
     kmerbv_gimark_sel = sdsl::select_support_mcl<1>(&kmerbv_gimark);
 
-    // The sd (stride) id rep addresses marks as run*L + offset -- pure arithmetic,
-    // no absolute-position table. Only the DENSE id rep needs kmerbv_all_p (it ranks
-    // absolute BWT rows). So build all_p only when loading the dense rep; the default
-    // sd path (and --kmer-count, which is run-local) never materializes it.
-    if (!kmerbv_use_sd and !movi_options->is_kmer_count()) {
+    // Sampled per-run absolute-position checkpoints for the MPHF id query
+    // (--kmer --kmer-bv). Both the sd and dense B_k reps address ABSOLUTE BWT rows
+    // (lb = all_p[run]+offset), so instead of storing all r+1 positions we keep one
+    // checkpoint every kmerbv_allp_S runs and reconstruct exact positions from the
+    // move structure's run lengths at query (reconstruct_allp). The stride defaults
+    // to 16 and is overridable via MOVI_ALLP_SAMPLE for space/speed benchmarking.
+    // --kmer-count is run-local and needs none.
+    if (!movi_options->is_kmer_count()) {
+        kmerbv_allp_S = 16;
+        if (const char* s = std::getenv("MOVI_ALLP_SAMPLE")) {
+            uint64_t v = std::strtoull(s, nullptr, 10);
+            if (v >= 1) kmerbv_allp_S = v;
+        }
         uint64_t w = (length <= 1) ? 1 : (sdsl::bits::hi(length) + 1);
-        kmerbv_all_p = sdsl::int_vector<>(r + 1, 0, w);
+        uint64_t nck = r / kmerbv_allp_S + 1;
+        kmerbv_allp_ckpt = sdsl::int_vector<>(nck, 0, w);
         uint64_t acc = 0;
-        for (uint64_t i = 0; i < r; ++i) { kmerbv_all_p[i] = acc; acc += get_n(i); }
-        kmerbv_all_p[r] = length;
+        for (uint64_t i = 0; i < r; ++i) {
+            if (i % kmerbv_allp_S == 0) kmerbv_allp_ckpt[i / kmerbv_allp_S] = acc;
+            acc += get_n(i);
+        }
     }
 
     INFO_MSG("Loaded k-mer bitvector for k=" + std::to_string(k));
