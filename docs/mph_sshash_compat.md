@@ -142,6 +142,7 @@ demand for `access`).
 
 - [x] `build-kmerbv --canonical`: 2-bit packed k-mer carried down the DFS, mark `B_k` only when `packed <= rc(packed)`; `kmerbv.<k>.meta` sidecar (canonical flag + num_kmers). **Validated: ecoli10 k=31 num_kmers=15,209,176 == KMC unique exactly; non-canonical = 2× (no odd-k palindromes).** (commit `a500502`)
 - [ ] `lookup`: query-time canonicalization + orientation in the `--kmer-bv` path (REQUIRED before canonical ids are queryable — a non-canonical query k-mer's lb is unmarked in canonical mode).
+- [x] **Sparse (Elias-Fano) `B_k` for the id** (`build-kmerbv` also writes `kmerbv.<k>.sd`; query selects it via `MOVI_ID_BV=sd`, rank routed through `kmerbv_rank1()`). **Necessary for SSHash size-competitiveness.** ecoli100 k=31 canonical: **sd_vector 32 MB vs dense bv+rank 149 MB (21%), and 0.57× SSHash's 56 MB** (the add-on goes from 2.6× SSHash to *smaller* than SSHash). Ids **identical** to dense (verified); query **~6.5% slower** (sd rank, 1.08→1.01 M/s on the unoptimized single-k-mer path) and **−114 MB RSS** (818→704). canonical mode halves the ones, so sd is even more favorable. (commit pending) — *Note: the on-disk/size-crossover number is now competitive; the remaining ~131 MB `kmerbv_all_p` is RSS-only (run-local-id elimination is a separate follow-up).*
 - [ ] `num_kmers` / `print-info` accessor (read from `.meta`).
 - [ ] `access`: `select` over `B_k` + forward reconstruction; `access-kmer` CLI.
 - [ ] extend the bijection test to canonical mode; cross-check `num_kmers` vs an SSHash `--canonical` index.
