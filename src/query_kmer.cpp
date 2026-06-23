@@ -529,61 +529,15 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                 #pragma omp atomic
                 kmer_stats.positive_kmers += found_kmer_count;
             } else {
-                static const bool kg_id = (std::getenv("MOVI_KEEPGOING_ID") != nullptr);
-                if (movi_options->is_kmer_bv() and kg_id) {
-                    // Fast keep-going MPHF-id walk (positive-skip presence + per-k-mer
-                    // id). Emits per k-mer internally.
+                if (movi_options->is_kmer_bv()) {
+                    // Fast keep-going MPHF-id walk: positive-skip presence + per-k-mer
+                    // canonical id (lazy-rc inside). 2.2x faster than the per-k-mer
+                    // single-search path (1.61 vs 0.73 M/s, ecoli100 k31), with
+                    // byte-identical ids. The count field shows presence (1); use
+                    // --kmer-count --kmer-bv for occurrence counts.
                     uint64_t found = query_kmers_id_bv(mq, pos_on_r);
                     #pragma omp atomic
                     kmer_stats.positive_kmers += found;
-                } else if (movi_options->is_kmer_bv()) {
-                    // Force single=true so backward_search_result is exactly the k-mer interval,
-                    // enabling a correct rank query for the MPHF ID.
-                    MoveInterval interval;
-                    uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r, /*single=*/true, &interval);
-                    if (found_kmer_count > 0 && !interval.is_empty()) {
-                        uint64_t lb_fw = kmerbv_all_p[interval.run_start] + interval.offset_start;
-                        uint64_t lb = lb_fw;
-                        int orientation = -1;  // per-orientation ids: orientation not applicable
-                        if (kmerbv_is_canonical) {
-                            // SSHash-compatible canonical id. B_k marks only canonical
-                            // k-mers, so id = rank(lb of canonical(x)). Canonicality is
-                            // decided from the STRINGS (x canonical iff x <= rc(x), which
-                            // equals lb_fw <= lb_rc since BWT intervals are lex-ordered), so
-                            // canonical k-mers use lb_fw directly with NO rc work. Only the
-                            // non-canonical k-mers pay for the rc interval, computed by the
-                            // normal ftab-assisted search on the rc string. (~1.56x faster
-                            // than always searching rc: 0.75 vs 0.48 M/s, ecoli100 k31.)
-                            std::string xstr = query_seq.substr(pos_on_r + 2 - k, k);
-                            std::string rcstr = reverse_complement(xstr);
-                            if (xstr <= rcstr) {
-                                orientation = 0;               // canonical: id = rank(lb_fw)
-                            } else {
-                                MoveQuery rcq(rcstr);
-                                int32_t rp = static_cast<int32_t>(k) - 1; uint64_t rml = 0;
-                                MoveInterval rc_iv = initialize_backward_search(rcq, rp, rml);
-                                rc_iv = backward_search(rcq.query(), rp, rc_iv,
-                                                        std::numeric_limits<int32_t>::max());
-                                if (!rc_iv.is_empty()) {
-                                    lb = kmerbv_all_p[rc_iv.run_start] + rc_iv.offset_start;
-                                    orientation = 1;
-                                } else {
-                                    orientation = 0;  // shouldn't happen in a doubled index
-                                }
-                            }
-                        }
-                        uint64_t kmer_id = kmerbv_rank1(lb);
-                        // The BWT interval size is the k-mer's occurrence count on the
-                        // doubled (fwd+rc) text = occ(x)+occ(rc(x)) = KMC canonical count.
-                        // Pass found_kmer_count for the presence tally and occ_count as
-                        // the displayed multiplicity.
-                        uint64_t occ_count = interval.count(rlbwt);
-                        mq.add_kmer(pos_on_r + 2 - k, found_kmer_count, kmer_id, occ_count, orientation);
-                    } else {
-                        mq.add_kmer(pos_on_r + 2 - k, found_kmer_count);
-                    }
-                    #pragma omp atomic
-                    kmer_stats.positive_kmers += found_kmer_count;
                 } else {
                     uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r);
                     // Outputing the kmer matches only works for the non-count mode (for now)
