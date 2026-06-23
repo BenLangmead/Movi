@@ -456,7 +456,7 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                     uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r, /*single=*/true, &interval);
                     if (found_kmer_count > 0 && !interval.is_empty()) {
                         uint64_t lb = kmerbv_all_p[interval.run_start] + interval.offset_start;
-                        uint64_t kmer_id = kmerbv_rank(lb);
+                        uint64_t kmer_id = kmerbv_rank1(lb);
                         // The BWT interval size is the k-mer's occurrence count on the
                         // doubled (fwd+rc) text = occ(x)+occ(rc(x)) = KMC canonical count.
                         // Pass found_kmer_count for the presence tally and occ_count as

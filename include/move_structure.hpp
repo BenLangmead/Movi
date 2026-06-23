@@ -437,6 +437,19 @@ class MoveStructure {
         sdsl::bit_vector kmerbv;
         sdsl::rank_support_v<> kmerbv_rank;
 
+        // Sparse (Elias-Fano) representation of B_k: ~4x smaller on disk than the
+        // dense bit_vector+rank when B_k is sparse (canonical k-mers mark only a few
+        // percent of the n BWT positions), making the MPHF-id add-on competitive
+        // with SSHash. Built alongside the dense bv; selected at load via MOVI_ID_BV=sd.
+        // rank/select are built in. kmerbv_rank1() routes the id rank to the chosen rep.
+        bool kmerbv_use_sd = false;
+        sdsl::sd_vector<> kmerbv_sd;
+        sdsl::sd_vector<>::rank_1_type kmerbv_sd_rank;
+        sdsl::sd_vector<>::select_1_type kmerbv_sd_sel;
+        inline uint64_t kmerbv_rank1(uint64_t lb) {
+            return kmerbv_use_sd ? kmerbv_sd_rank(lb) : kmerbv_rank(lb);
+        }
+
         // Run-local (all_p-free) k-mer count structure. A k-mer's count is
         // resolved from Movi's run lengths plus a per-run record of which run heads
         // are group-starts (ex) and where the interior group-starts fall (hi +

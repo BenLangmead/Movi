@@ -3,6 +3,7 @@
 #include <stack>
 #include <unordered_map>
 #include <fstream>
+#include <cstdlib>
 
 void MoveStructure::rebuild_all_p_if_needed() {
     if (!all_p.empty()) return;
@@ -176,6 +177,12 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
         uint64_t ones = rank_bv(bv.size());
         sdsl::store_to_file(bv,      index_dir + "/kmerbv." + ks_ + ".bv");
         sdsl::store_to_file(rank_bv, index_dir + "/kmerbv." + ks_ + ".rank");
+        // Sparse (Elias-Fano) B_k: usually far smaller than bv+rank (B_k is sparse),
+        // and competitive with SSHash. Used at query via MOVI_ID_BV=sd.
+        sdsl::sd_vector<> sdb(bv);
+        sdsl::store_to_file(sdb, index_dir + "/kmerbv." + ks_ + ".sd");
+        uint64_t sz_dense = sdsl::size_in_bytes(bv) + sdsl::size_in_bytes(rank_bv);
+        uint64_t sz_sd    = sdsl::size_in_bytes(sdb);
 
         // Run-local (all_p-free) count structure derived from C_k. Decompose the
         // group-starts relative to Movi's run heads (which come for free from the
@@ -234,8 +241,12 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
         }
 
         INFO_MSG("k=" + ks_ + ": num_kmers=" + std::to_string(ones) + " distinct " +
-                 (canonical ? "CANONICAL " : "") + "k-mers; bitvectors written to " +
-                 index_dir + "/kmerbv." + ks_ + ".{bv,cnt.*,meta}");
+                 (canonical ? "CANONICAL " : "") + "k-mers; B_k id rep: dense(bv+rank)=" +
+                 std::to_string(sz_dense / 1048576) + "MB, sd_vector=" +
+                 std::to_string(sz_sd / 1048576) + "MB (" +
+                 std::to_string(sz_dense ? (100 * sz_sd / sz_dense) : 0) +
+                 "% of dense); written to " + index_dir + "/kmerbv." + ks_ +
+                 ".{bv,rank,sd,cnt.*,meta}");
     }
 }
 
@@ -252,9 +263,24 @@ void MoveStructure::load_kmerbv(uint32_t k) {
                       std::to_string(k) + "' first."));
     }
 
-    sdsl::load_from_file(kmerbv,      bv_path);
-    sdsl::load_from_file(kmerbv_rank, rank_path);
-    kmerbv_rank.set_vector(&kmerbv);
+    // MPHF-id B_k representation: dense bit_vector+rank (default) or sparse
+    // Elias-Fano sd_vector (MOVI_ID_BV=sd) -- the sd rep is ~4x smaller on disk and
+    // competitive with SSHash, at a modest rank-speed cost. rank routes via kmerbv_rank1().
+    const char* idbv_env = std::getenv("MOVI_ID_BV");
+    kmerbv_use_sd = (idbv_env != nullptr && std::string(idbv_env) == "sd");
+    if (kmerbv_use_sd) {
+        std::string sd_path = index_dir + "/kmerbv." + std::to_string(k) + ".sd";
+        if (!std::filesystem::exists(sd_path))
+            throw std::runtime_error(ERROR_MSG("MOVI_ID_BV=sd but " + sd_path +
+                " is missing; rebuild with this build-kmerbv (it writes .sd)."));
+        sdsl::load_from_file(kmerbv_sd, sd_path);
+        kmerbv_sd_rank = sdsl::sd_vector<>::rank_1_type(&kmerbv_sd);
+        kmerbv_sd_sel  = sdsl::sd_vector<>::select_1_type(&kmerbv_sd);
+    } else {
+        sdsl::load_from_file(kmerbv,      bv_path);
+        sdsl::load_from_file(kmerbv_rank, rank_path);
+        kmerbv_rank.set_vector(&kmerbv);
+    }
 
     // Run-local (all_p-free) count structure: per-run interior offsets + the
     // run-head exception/has-interior flags. kmer_count_from_bv resolves a
