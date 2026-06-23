@@ -423,13 +423,15 @@ uint64_t MoveStructure::query_kmers_id_bv(MoveQuery& mq, int32_t& pos_on_r) {
     uint64_t kmers_found = 0;
     while (true) {
         if (anchor - pos_on_r + 1 >= k) {
-            uint64_t lb_for_rank = kmerbv_all_p[interval.run_start] + interval.offset_start;
+            // id from (run, offset): the walk's subset interval sits in the k-mer's
+            // group, so kmerbv_id() = rank(addr+1)-1 yields the k-mer's id.
+            uint64_t id_run = interval.run_start, id_off = interval.offset_start;
             int orientation = -1;
             if (kmerbv_is_canonical) {
                 std::string xstr = query_seq.substr(pos_on_r, k);
                 std::string rcstr = reverse_complement(xstr);
                 if (xstr <= rcstr) {
-                    orientation = 0;  // canonical: the subset interval's lb_row works
+                    orientation = 0;  // canonical: use the forward (subset) interval
                 } else {
                     MoveQuery rcq(rcstr);
                     int32_t rp = k - 1; uint64_t rml = 0;
@@ -437,14 +439,14 @@ uint64_t MoveStructure::query_kmers_id_bv(MoveQuery& mq, int32_t& pos_on_r) {
                     rc_iv = backward_search(rcq.query(), rp, rc_iv,
                                             std::numeric_limits<int32_t>::max());
                     if (!rc_iv.is_empty()) {
-                        lb_for_rank = kmerbv_all_p[rc_iv.run_start] + rc_iv.offset_start;
+                        id_run = rc_iv.run_start; id_off = rc_iv.offset_start;
                         orientation = 1;
                     } else {
                         orientation = 0;
                     }
                 }
             }
-            uint64_t kmer_id = kmerbv_rank1(lb_for_rank + 1) - 1;
+            uint64_t kmer_id = kmerbv_id(id_run, id_off);
             mq.add_kmer(pos_on_r, /*present=*/1, kmer_id,
                         std::numeric_limits<uint64_t>::max(), orientation);
             kmers_found += 1;

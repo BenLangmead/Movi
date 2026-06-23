@@ -177,12 +177,31 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
         // it is only written with --id-bv-dense (for benchmarking / max speed).
         sdsl::bit_vector& bv = bvs.at(k);
         sdsl::rank_support_v<> rank_bv(&bv);
-        uint64_t ones = rank_bv(bv.size());          // = num_kmers (rank not stored unless --id-bv-dense)
-        sdsl::sd_vector<> sdb(bv);
+        uint64_t ones = rank_bv(bv.size());          // = num_kmers
+        // Stride-addressed sparse B_k: address each mark as run*L + offset (L =
+        // MAX_RUN_LENGTH, the length-split bound) rather than its absolute BWT row.
+        // This eliminates the per-run absolute-position table (kmerbv_all_p,
+        // ~r*log2(n) bits ~ a whole SSHash index) at query: lb = run*L + offset is
+        // pure arithmetic. Universe grows from n to r*L, but sd_vector cost scales
+        // with log2(universe/m), so the few extra bits/mark are far cheaper than
+        // all_p. Built directly via sd_vector_builder (a dense bit_vector over r*L
+        // would be huge); set() is monotonic in p so the addresses are increasing.
+        const uint64_t L = MAX_RUN_LENGTH;
+        const uint64_t U = static_cast<uint64_t>(r) * L;
+        sdsl::sd_vector_builder builder(U, ones);
+        {
+            uint64_t run = 0;
+            for (uint64_t p = 0; p < length; ++p) {
+                while (run + 1 < all_p.size() and all_p[run + 1] <= p) run++;
+                if (bv[p]) builder.set(run * L + (p - all_p[run]));
+            }
+        }
+        sdsl::sd_vector<> sdb(builder);
         sdsl::store_to_file(sdb, index_dir + "/kmerbv." + ks_ + ".sd");
         uint64_t sz_sd    = sdsl::size_in_bytes(sdb);
         uint64_t sz_dense = sdsl::size_in_bytes(bv) + sdsl::size_in_bytes(rank_bv);
         if (movi_options->is_kmerbv_id_dense()) {
+            // Dense rep keeps absolute-row addressing (needs all_p at query).
             sdsl::store_to_file(bv,      index_dir + "/kmerbv." + ks_ + ".bv");
             sdsl::store_to_file(rank_bv, index_dir + "/kmerbv." + ks_ + ".rank");
         }
@@ -239,8 +258,9 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
         // Sidecar metadata so the query / access side knows the id space:
         //   line 1: canonical flag (0|1);  line 2: num_kmers (= ones).
         {
+            // line1: canonical flag; line2: num_kmers; line3: L (sd address stride)
             std::ofstream meta(index_dir + "/kmerbv." + ks_ + ".meta");
-            meta << (canonical ? 1 : 0) << "\n" << ones << "\n";
+            meta << (canonical ? 1 : 0) << "\n" << ones << "\n" << L << "\n";
         }
 
         INFO_MSG("k=" + ks_ + ": num_kmers=" + std::to_string(ones) + " distinct " +
@@ -299,11 +319,11 @@ void MoveStructure::load_kmerbv(uint32_t k) {
         kmerbv_rank.set_vector(&kmerbv);
     }
 
-    // Read the id-space metadata (canonical flag + num_kmers). In canonical mode
-    // the query must canonicalize each k-mer (the lookup uses rank(min(lb_fw,lb_rc))).
-    kmerbv_is_canonical = false; kmerbv_num_kmers = 0;
+    // Read the id-space metadata (canonical flag + num_kmers + L). In canonical
+    // mode the query canonicalizes each k-mer; L is the sd address stride.
+    kmerbv_is_canonical = false; kmerbv_num_kmers = 0; kmerbv_L = 0;
     std::ifstream meta(index_dir + "/kmerbv." + ks_ + ".meta");
-    if (meta) { int c = 0; meta >> c >> kmerbv_num_kmers; kmerbv_is_canonical = (c == 1); }
+    if (meta) { int c = 0; meta >> c >> kmerbv_num_kmers >> kmerbv_L; kmerbv_is_canonical = (c == 1); }
 
     // Run-local (all_p-free) count structure: per-run interior offsets + the
     // run-head exception/has-interior flags. kmer_count_from_bv resolves a
@@ -317,12 +337,11 @@ void MoveStructure::load_kmerbv(uint32_t k) {
     kmerbv_hi_ones = kmerbv_hi_rank(kmerbv_hi.size());
     kmerbv_gimark_sel = sdsl::select_support_mcl<1>(&kmerbv_gimark);
 
-    // The MPHF id (--kmer --kmer-bv) forms lb = kmerbv_all_p[run] + offset to do
-    // rank(lb) on B_k, so it needs a per-run absolute-position table; the
-    // run-local count needs no absolute positions. Build the table only for id
-    // queries (not --kmer-count) -- that is the all_p elimination on the count
-    // path. The table is bit-packed (width ceil(log2 n)), not the 8-byte/run all_p.
-    if (!movi_options->is_kmer_count()) {
+    // The sd (stride) id rep addresses marks as run*L + offset -- pure arithmetic,
+    // no absolute-position table. Only the DENSE id rep needs kmerbv_all_p (it ranks
+    // absolute BWT rows). So build all_p only when loading the dense rep; the default
+    // sd path (and --kmer-count, which is run-local) never materializes it.
+    if (!kmerbv_use_sd and !movi_options->is_kmer_count()) {
         uint64_t w = (length <= 1) ? 1 : (sdsl::bits::hi(length) + 1);
         kmerbv_all_p = sdsl::int_vector<>(r + 1, 0, w);
         uint64_t acc = 0;

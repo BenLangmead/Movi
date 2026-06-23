@@ -447,8 +447,21 @@ class MoveStructure {
         sdsl::sd_vector<> kmerbv_sd;
         sdsl::sd_vector<>::rank_1_type kmerbv_sd_rank;
         sdsl::sd_vector<>::select_1_type kmerbv_sd_sel;
-        inline uint64_t kmerbv_rank1(uint64_t lb) {
-            return kmerbv_use_sd ? kmerbv_sd_rank(lb) : kmerbv_rank(lb);
+        // Stride for the sd-vector address space: each B_k mark at row (run,offset)
+        // is placed at run*kmerbv_L + offset instead of its absolute BWT row. Since
+        // rows are <= L after length-splitting (L = MAX_RUN_LENGTH), this is an
+        // injective, order-preserving address with no per-run position table -- it
+        // eliminates kmerbv_all_p (~r*log2(n) bits) at the cost of a slightly larger
+        // sd universe (r*L vs n; sd cost only grows as log2(universe/m)). Set from
+        // the .meta sidecar at load. The dense rep keeps absolute-row addressing.
+        uint64_t kmerbv_L = 0;
+        // MPHF id of the k-mer whose interval starts at (run, offset). id =
+        // rank(addr+1)-1 holds for an exact OR a subset interval (the k-mer's mark
+        // is the only 1 in its group). sd: addr = run*L+offset (no all_p); dense:
+        // addr = all_p[run]+offset (absolute row).
+        inline uint64_t kmerbv_id(uint64_t run, uint64_t offset) {
+            if (kmerbv_use_sd) return kmerbv_sd_rank(run * kmerbv_L + offset + 1) - 1;
+            return kmerbv_rank(kmerbv_all_p[run] + offset + 1) - 1;
         }
         // From kmerbv.<k>.meta: whether B_k marks only CANONICAL k-mers (ids in
         // [0,num_kmers), SSHash-compatible) and the num_kmers (= ones in B_k).
