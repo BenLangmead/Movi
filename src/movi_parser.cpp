@@ -151,6 +151,7 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
         ("kmer", "Search all the kmers")
         ("kmer-count", "Find the count of every kmer")
         ("kmer-bv", "Augment k-mer output with a unique MPHF-style integer ID per k-mer (requires prior 'build-kmerbv' step)")
+        ("output-format", "K-mer output format: 'movi' (default, per-read line), 'kmc' (one '<canonical_kmer>\\t<count>' line per present k-mer, like KMC's dump; use with --kmer-count), or 'sshash' (suppress per-k-mer lines, print SSHash's aggregate query report)", cxxopts::value<std::string>())
         ("k,k-length", "The length of the kmer", cxxopts::value<uint32_t>())
         ("bin-width", "The width of the bin used for binary classification", cxxopts::value<uint32_t>())
         ("ignore-illegal-chars", "In the case of illegal characters (i.e., non-ACGT for genomic data), substitute the character with \'A\'(1) or a random character from the alphabet (2).", cxxopts::value<int>())
@@ -377,6 +378,18 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
                     if (result.count("kmer") >= 1) { movi_options.set_kmer(); movi_options.set_prefetch(false); }
                     if (result.count("kmer-count") >= 1) { movi_options.set_kmer(); movi_options.set_kmer_count(true); movi_options.set_prefetch(false); }
                     if (result.count("kmer-bv") >= 1) { movi_options.set_kmer_bv(true); }
+                    if (result.count("output-format") >= 1) {
+                        if (!movi_options.set_output_format(result["output-format"].as<std::string>())) {
+                            std::cerr << "Unknown --output-format (expected movi|kmc|sshash).\n";
+                            return false;
+                        }
+                        // KMC's dump carries occurrence counts, so the kmc format
+                        // implies a count query (otherwise the column would hold a
+                        // presence run length).
+                        if (movi_options.is_output_format_kmc()) {
+                            movi_options.set_kmer(); movi_options.set_kmer_count(true); movi_options.set_prefetch(false);
+                        }
+                    }
                     if (result.count("mem") >= 1) { movi_options.set_mem(); }
                     if (result.count("count") >= 1) { movi_options.set_count(); }
                     if (result.count("zml") >= 1) { movi_options.set_zml(); }

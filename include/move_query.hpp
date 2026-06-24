@@ -2,6 +2,8 @@
 #define MOVE_QUERY_HPP
 
 #include <algorithm>
+#include <vector>
+#include <utility>
 
 class MoveQuery {
     public:
@@ -29,6 +31,9 @@ class MoveQuery {
                 found_kmer_count += kmer_count;
                 uint64_t shown = (display_count != std::numeric_limits<uint64_t>::max())
                                  ? display_count : kmer_count;
+                // Structured record for non-native output formats (e.g. KMC dump):
+                // each present k-mer's start position in the read and its shown count.
+                kmer_pos_count.emplace_back(pos_on_r, shown);
                 if (kmer_id != std::numeric_limits<uint64_t>::max()) {
                     matching_lengths_string += std::to_string(pos_on_r) + ":" +
                                                std::to_string(shown) + ":" +
@@ -81,6 +86,7 @@ class MoveQuery {
         std::vector<uint64_t>& get_matching_colors() { return matching_colors; }
         std::vector<uint64_t>& get_sa_entries() { return sa_entries; }
         std::string& get_matching_lengths_string() { return matching_lengths_string; }
+        std::vector<std::pair<int32_t, uint64_t>>& get_kmer_pos_count() { return kmer_pos_count; }
         std::vector<mem_t>& get_mems() { return mems; }
         std::vector<uint16_t>& get_scans() { return scans; }
         std::vector<uint16_t>& get_fastforwards() { return fastforwards; }
@@ -102,6 +108,7 @@ class MoveQuery {
         std::string query_id = "";
         std::string query_string = "";
         std::string matching_lengths_string = "";
+        std::vector<std::pair<int32_t, uint64_t>> kmer_pos_count;  // (pos, count) per present k-mer
         std::vector<uint64_t> sa_entries;
         std::vector<uint16_t> matching_lens;
         std::vector<uint64_t> matching_colors;

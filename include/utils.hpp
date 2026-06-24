@@ -188,7 +188,9 @@ void output_base_stats(DataType data_type, bool to_stdout, std::ofstream& output
 
 void output_counts(bool to_stdout, std::ofstream& count_file, size_t query_length, int32_t pos_on_r, uint64_t match_count, MoveQuery& mq);
 
-void output_kmers(bool to_stdout, std::ofstream& kmer_file, size_t all_kmer_count, MoveQuery& mq);
+size_t count_invalid_kmer_windows(const std::string& s, size_t k);
+void output_kmers(bool to_stdout, std::ofstream& kmer_file, size_t all_kmer_count,
+                  MoveQuery& mq, MoviOptions& movi_options);
 
 void output_logs(std::ofstream& costs_file, std::ofstream& scans_file, std::ofstream& fastforwards_file, MoveQuery& mq);
 

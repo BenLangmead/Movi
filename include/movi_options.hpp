@@ -93,6 +93,26 @@ class MoviOptions {
         bool is_kmerbv_id_dense() { return kmerbv_id_dense; }
         void set_kmerbv_id_dense(bool val) { kmerbv_id_dense = val; }
 
+        // K-mer output format for the query path (default: movi's per-read line).
+        //   movi   : <read> <found>/<total> <pos:count[:id[:f|r]] ...>  (native)
+        //   kmc    : one line per present query k-mer: <canonical_kmer>\t<count>
+        //            (mimics KMC's dump; requires --kmer-count for the count column)
+        //   sshash : suppress per-k-mer lines; print SSHash's aggregate query report
+        //            (num_kmers / num_positive_kmers / num_negative_kmers /
+        //             num_invalid_kmers) once at the end of the run
+        enum class OutputFormat { movi, kmc, sshash };
+        OutputFormat get_output_format() { return output_format; }
+        bool set_output_format(const std::string& s) {
+            if (s == "movi") output_format = OutputFormat::movi;
+            else if (s == "kmc") output_format = OutputFormat::kmc;
+            else if (s == "sshash") output_format = OutputFormat::sshash;
+            else return false;
+            return true;
+        }
+        bool is_output_format_movi()   { return output_format == OutputFormat::movi; }
+        bool is_output_format_kmc()    { return output_format == OutputFormat::kmc; }
+        bool is_output_format_sshash() { return output_format == OutputFormat::sshash; }
+
         std::string get_ref_file() { return ref_file; }
         std::string get_bwt_file() { return bwt_file; }
         std::string get_read_file() { return read_file; }
@@ -265,6 +285,7 @@ class MoviOptions {
         std::vector<uint32_t> build_kmerbv_ks;
         bool kmerbv_canonical = false;
         bool kmerbv_id_dense = false;
+        OutputFormat output_format = OutputFormat::movi;
         bool reverse = false;
         bool mmap = false;
         bool prefetch = true;

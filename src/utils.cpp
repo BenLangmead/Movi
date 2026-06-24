@@ -253,13 +253,47 @@ void output_counts(bool to_stdout, std::ofstream& count_file, size_t query_lengt
     }
 }
 
-void output_kmers(bool to_stdout, std::ofstream& kmer_file, size_t all_kmer_count, MoveQuery& mq) {
-    if (to_stdout) {
-        std::cout << mq.get_query_id() << "\t";
-        std::cout << mq.found_kmer_count << "/" << all_kmer_count << "\t" << mq.get_matching_lengths_string() << "\n";
+// Number of length-k windows of s that contain a non-ACGT character (used for
+// the SSHash-style aggregate report, where every window is positive, negative,
+// or invalid). O(|s|): a window [i, i+k) is invalid iff the most recent bad
+// character seen at its right end falls within the window.
+size_t count_invalid_kmer_windows(const std::string& s, size_t k) {
+    size_t L = s.size();
+    if (k == 0 || L < k) return 0;
+    size_t invalid = 0;
+    long last_bad = -1;
+    for (size_t r = 0; r < L; ++r) {
+        char c = s[r];
+        if (!(c=='A'||c=='C'||c=='G'||c=='T'||c=='a'||c=='c'||c=='g'||c=='t'))
+            last_bad = static_cast<long>(r);
+        if (r + 1 >= k && last_bad >= static_cast<long>(r - k + 1)) invalid++;
+    }
+    return invalid;
+}
+
+void output_kmers(bool to_stdout, std::ofstream& kmer_file, size_t all_kmer_count,
+                  MoveQuery& mq, MoviOptions& movi_options) {
+    std::ostream& out = to_stdout ? static_cast<std::ostream&>(std::cout)
+                                  : static_cast<std::ostream&>(kmer_file);
+    if (movi_options.is_output_format_kmc()) {
+        // One '<canonical_kmer>\t<count>' line per present k-mer, like KMC's dump.
+        // --output-format kmc implies --kmer-count, so the stored count is the
+        // k-mer's occurrence multiplicity.
+        size_t k = movi_options.get_k();
+        std::string& seq = mq.query();
+        for (auto& pc : mq.get_kmer_pos_count()) {
+            int32_t pos = pc.first;
+            if (pos < 0 || pos + static_cast<int32_t>(k) > static_cast<int32_t>(seq.size())) continue;
+            std::string km = seq.substr(pos, k);
+            std::string rc = reverse_complement(km);
+            out << (km <= rc ? km : rc) << "\t" << pc.second << "\n";
+        }
+    } else if (movi_options.is_output_format_sshash()) {
+        // No per-read output; the aggregate report is printed once at the end.
     } else {
-        kmer_file << mq.get_query_id() << "\t";
-        kmer_file << mq.found_kmer_count << "/" << all_kmer_count << "\t" << mq.get_matching_lengths_string() << "\n";
+        out << mq.get_query_id() << "\t"
+            << mq.found_kmer_count << "/" << all_kmer_count << "\t"
+            << mq.get_matching_lengths_string() << "\n";
     }
 }
 

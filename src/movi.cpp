@@ -80,13 +80,30 @@ void handle_kmer(MoveQuery& mq, MoviOptions& movi_options,
                  MoveStructure& mv_, OutputFiles& output_files) {
     mv_.query_all_kmers(mq, movi_options.is_kmer_count());
 
+    // For the SSHash-style aggregate report, accumulate window-accurate tallies:
+    // every length-k window is positive (found), invalid (non-ACGT), or negative.
+    if (movi_options.is_output_format_sshash()) {
+        size_t k = movi_options.get_k();
+        size_t L = mq.query().length();
+        size_t total = (L >= k) ? (L - k + 1) : 0;
+        size_t invalid = count_invalid_kmer_windows(mq.query(), k);
+        #pragma omp atomic
+        mv_.kmer_stats.agg_num_kmers += total;
+        #pragma omp atomic
+        mv_.kmer_stats.agg_invalid += invalid;
+        #pragma omp atomic
+        mv_.kmer_stats.agg_positive += mq.found_kmer_count;
+    }
+
     // Emit per-k-mer output in both presence and count modes.  (Count mode now
     // populates the same per-k-mer string via add_kmer, so it is no longer
-    // suppressed here.)
+    // suppressed here.)  The sshash format suppresses per-read lines (handled in
+    // output_kmers) and prints its aggregate report once at the end.
     if (movi_options.write_output_allowed()) {
         #pragma omp critical
         {
-            output_kmers(movi_options.write_stdout_enabled(), output_files.kmer_file, mq.query().length() - movi_options.get_k() + 1, mq);
+            output_kmers(movi_options.write_stdout_enabled(), output_files.kmer_file,
+                         mq.query().length() - movi_options.get_k() + 1, mq, movi_options);
         }
     }
 }
@@ -391,6 +408,11 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
 
     if (movi_options.write_output_allowed()) {
         print_query_stats(movi_options, total_ff_count, mv_);
+    }
+
+    // SSHash-style aggregate query report (membership tallies), printed once.
+    if (movi_options.is_kmer() && movi_options.is_output_format_sshash()) {
+        mv_.kmer_stats.print_sshash_report();
     }
 
     if (movi_options.is_classify()) {

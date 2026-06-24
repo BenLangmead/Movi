@@ -30,6 +30,25 @@ struct KmerStatistics {
 
         std::cout << "- - - - - - - - - - - - - -- - - - - - - - - - - - - - - - - -\n\n";
     }
+    // Window-accurate aggregate tallies for the SSHash-style query report
+    // (accumulated per read in handle_kmer): every length-k window of every read
+    // is exactly one of positive / negative / invalid (contains a non-ACGT base).
+    void print_sshash_report() {
+        uint64_t neg = (agg_num_kmers >= agg_positive + agg_invalid)
+                       ? agg_num_kmers - agg_positive - agg_invalid : 0;
+        auto pct = [&](uint64_t v) {
+            return agg_num_kmers ? (100.0 * static_cast<double>(v) / static_cast<double>(agg_num_kmers)) : 0.0;
+        };
+        std::cout << "==== query report:\n";
+        std::cout << "num_kmers = " << agg_num_kmers << "\n";
+        std::cout << "num_positive_kmers = " << agg_positive << " (" << pct(agg_positive) << "%)\n";
+        std::cout << "num_negative_kmers = " << neg << " (" << pct(neg) << "%)\n";
+        std::cout << "num_invalid_kmers = " << agg_invalid << " (" << pct(agg_invalid) << "%)\n";
+    }
+    uint64_t agg_num_kmers = 0;   // total length-k windows over all reads
+    uint64_t agg_positive  = 0;   // windows present in the index
+    uint64_t agg_invalid   = 0;   // windows containing a non-ACGT base
+
     uint64_t total_counts = 0;
     uint64_t positive_kmers = 0;
     uint64_t positive_skipped = 0;
