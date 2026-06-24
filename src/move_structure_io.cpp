@@ -788,6 +788,11 @@ void MoveStructure::read_ftab() {
     size_t ftab_k = movi_options->get_ftab_k();
     if (movi_options->is_multi_ftab()) {
         ftabs.resize(ftab_k);
+        // The multi-ftab fallback in initialize_backward_search steps DOWN BY 2
+        // (ftab_k -> ftab_k-2 -> ...), so only those levels are ever used. Load
+        // exactly that ladder (e.g. 12,10,8,6,4,2 for ftab-k 12) -- stepping by 1
+        // here would demand intermediate ftabs that are never consulted and throw
+        // if (as intended) they were not built.
         while (ftab_k > 1) {
             std::string fname = movi_options->get_index_dir() + "/ftab." + std::to_string(ftab_k) + ".bin";
             std::ifstream fin(fname, std::ios::in | std::ios::binary);
@@ -808,7 +813,7 @@ void MoveStructure::read_ftab() {
             fin.read(reinterpret_cast<char*>(&new_ftab[0]), ftab_size*sizeof(new_ftab[0]));
             fin.close();
             ftabs[ftab_k - 1] = new_ftab;
-            ftab_k -= 1;
+            ftab_k -= 2;
         }
     } else {
         INFO_MSG("Reading the ftab..");
