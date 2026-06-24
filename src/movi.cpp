@@ -733,6 +733,12 @@ int main(int argc, char** argv) {
 
             query(mv_, movi_options);
 
+            // quick_exit() skips static destructors, so the std::cout buffer (custom
+            // buffer set above) is NOT flushed automatically -- trailing output such
+            // as the end-of-run k-mer stats / SSHash report would be lost. Flush
+            // explicitly before exiting.
+            std::cout.flush();
+
             // Avoid taking too long for dealloction of large data structures at the end of the program
             std::quick_exit(0);
 
