@@ -330,8 +330,9 @@ void print_query_stats(MoviOptions& movi_options, uint64_t total_ff_count, MoveS
         if (movi_options.is_verbose()) {
             INFO_MSG("all fast forward counts: " + format_number_with_commas(total_ff_count));
         }
-    } else if (movi_options.is_kmer() && !movi_options.is_output_format_sshash()) {
-        // sshash format prints only its own aggregate report (see print_sshash_report).
+    } else if (movi_options.is_kmer() && movi_options.is_output_format_movi()) {
+        // Only the native format prints the internal stats block. kmc emits a clean
+        // '<kmer>\t<count>' dump; sshash prints only its aggregate report.
         mv.kmer_stats.print(movi_options.is_kmer_count());
     }
 }
