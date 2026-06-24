@@ -39,6 +39,9 @@ struct KmerStatistics {
         auto pct = [&](uint64_t v) {
             return agg_num_kmers ? (100.0 * static_cast<double>(v) / static_cast<double>(agg_num_kmers)) : 0.0;
         };
+        // Match SSHash's default float precision (e.g. "92.142%"); the kmer stats
+        // block above leaves std::cout at setprecision(2), which would truncate.
+        std::cout << std::setprecision(6);
         std::cout << "==== query report:\n";
         std::cout << "num_kmers = " << agg_num_kmers << "\n";
         std::cout << "num_positive_kmers = " << agg_positive << " (" << pct(agg_positive) << "%)\n";
