@@ -42,6 +42,12 @@ class MoviOptions {
         bool is_zml() { return zml_query; }
         bool is_count() { return count_query; }
         bool is_kmer() { return kmer_query; }
+        bool is_kmer_bv() { return kmer_bv; }
+        void set_kmer_bv(bool val) { kmer_bv = val; }
+        std::vector<uint32_t> get_build_kmerbv_ks() { return build_kmerbv_ks; }
+        void set_build_kmerbv_ks(std::vector<uint32_t> ks) { build_kmerbv_ks = ks; }
+        bool is_kmerbv_canonical() { return kmerbv_canonical; }
+        void set_kmerbv_canonical(bool val) { kmerbv_canonical = val; }
         bool is_kmer_count() { return kmer_count; }
         bool is_mem() { return mem_query; }
         bool is_batch() { return batch_mode; }
@@ -253,6 +259,9 @@ class MoviOptions {
         bool count_query = false;
         bool kmer_query = false;
         bool kmer_count = false;
+        bool kmer_bv = false;
+        std::vector<uint32_t> build_kmerbv_ks;
+        bool kmerbv_canonical = false;
         bool mem_query = false;
         bool reverse = false;
         bool mmap = false;

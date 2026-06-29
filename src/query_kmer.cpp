@@ -357,7 +357,14 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
             kmer_stats.look_ahead_skipped += step + 1;
             pos_on_r = pos_on_r - step - 1;
         } else {
-            if (kmer_counts) {
+            if (kmer_counts and movi_options->is_kmer_bv()) {
+                // Fast count path: the presence positive-skip walk plus the run-local
+                // count structure C_k (predecessor/successor of the k-mer's group) to
+                // resolve each present k-mer's count without a per-k-mer search.
+                uint64_t found = query_kmers_count_bv(mq, pos_on_r);
+                #pragma omp atomic
+                kmer_stats.positive_kmers += found;
+            } else if (kmer_counts) {
                 // Correct per-kmer count via the single-kmer presence search: the matched
                 // BWT interval's size is the k-mer's occurrence count, so no ftab is needed
                 // and we get a per-kmer count. On the doubled (fwd+rc) text the interval size
@@ -387,4 +394,56 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
             pos_on_r -= 1; // Find the first position where the character is legal
         }
     }
+}
+
+uint64_t MoveStructure::query_kmers_count_bv(MoveQuery& mq, int32_t& pos_on_r) {
+    size_t ftab_k = movi_options->get_ftab_k();
+    int32_t k = static_cast<int32_t>(movi_options->get_k());
+    auto& query_seq = mq.query();
+    int32_t pos_on_r_saved = pos_on_r;
+
+    uint64_t match_len = 0;
+    MoveInterval interval;
+    do {
+        interval = initialize_backward_search(mq, pos_on_r, match_len);
+        if (match_len == 0 and ftab_k > 1) {
+            pos_on_r -= 1;
+            pos_on_r_saved = pos_on_r;
+        }
+    } while (match_len == 0 and pos_on_r >= k - 1 and ftab_k > 1);
+
+    if (interval.is_empty()) {
+        pos_on_r = pos_on_r_saved - 1;
+        return 0;
+    }
+
+    // anchor = right end of the match; covered length = anchor - pos_on_r + 1.
+    const int32_t anchor = pos_on_r_saved;
+    uint64_t kmers_found = 0;
+    while (true) {
+        if (anchor - pos_on_r + 1 >= k) {
+            // Resolve the count of the leftmost k-mer (starts at pos_on_r).
+            uint64_t cnt = kmer_count_from_bv(interval);
+            mq.add_kmer(pos_on_r, cnt);
+            kmers_found += 1;
+        }
+        if (pos_on_r <= 0) break;
+        MoveInterval prev = interval;
+        if (!backward_search_step(query_seq[pos_on_r - 1], interval)) {
+            interval = prev;  // step emptied the interval; stop this run
+            break;
+        }
+        pos_on_r -= 1;
+    }
+
+    if (kmers_found > 0) {
+        #pragma omp atomic
+        kmer_stats.positive_skipped += kmers_found - 1;
+        // pos_on_r is the leftmost resolved k-mer's start; the next k-mer to
+        // process ends at pos_on_r + k - 2 (mirrors query_kmers_from).
+        pos_on_r = pos_on_r + k - 2;
+    } else {
+        pos_on_r = pos_on_r_saved - 1;
+    }
+    return kmers_found;
 }

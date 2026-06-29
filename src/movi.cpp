@@ -226,6 +226,11 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
         INFO_MSG("Ftab was read!");
     }
 
+    if (movi_options.is_kmer_bv()) {
+        mv_.load_kmerbv(movi_options.get_k());
+        INFO_MSG("K-mer bitvector was loaded!");
+    }
+
 #if TALLY_MODES
     if (movi_options.is_zml() or movi_options.is_count()) {
         //TODO: Implement tally modes for zml and count queries.
@@ -683,6 +688,11 @@ int main(int argc, char** argv) {
             mv_.find_sampled_SA_entries();
             mv_.serialize_sampled_SA();
             SUCCESS_MSG("Successfully stored sampled SA entries at " + movi_options.get_index_dir());
+        } else if (command == "build-kmerbv") {
+            MoveStructure mv_(&movi_options);
+            mv_.deserialize();
+            mv_.build_kmerbv(movi_options.get_build_kmerbv_ks());
+            SUCCESS_MSG("Successfully built k-mer bitvector(s) at " + movi_options.get_index_dir());
         } else if (command == "color") {
             MoveStructure mv_(&movi_options);
             auto begin = std::chrono::system_clock::now();

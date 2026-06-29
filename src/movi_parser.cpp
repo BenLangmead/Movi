@@ -151,6 +151,7 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
         ("rpml", "Compute the pseudo-matching lengths using random repositioning (RPMLs)")
         ("kmer", "Search all the kmers")
         ("kmer-count", "Find the count of every kmer")
+        ("kmer-bv", "Use the prebuilt k-mer bitvector index (see build-kmerbv) for fast run-local counts with --kmer-count")
         ("k,k-length", "The length of the kmer", cxxopts::value<uint32_t>())
         ("bin-width", "The width of the bin used for binary classification", cxxopts::value<uint32_t>())
         ("ignore-illegal-chars", "In the case of illegal characters (i.e., non-ACGT for genomic data), substitute the character with \'A\'(1) or a random character from the alphabet (2).", cxxopts::value<int>())
@@ -212,6 +213,12 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
     auto LFOptions = options.add_options("LF")
         ("i,index", "Index directory [REQUIRED]", cxxopts::value<std::string>())
         ("lf-type", "type of the LF query: \"reconstruct\", \"sequential\", or \"random\"", cxxopts::value<std::string>());
+
+    all_actions.push_back("build-kmerbv");
+    auto buildKmerBvOptions = options.add_options("build-kmerbv")
+        ("i,index", "Index directory [REQUIRED]", cxxopts::value<std::string>())
+        ("kmer-lengths", "K-mer length(s) for bitvector construction [REQUIRED, repeatable]", cxxopts::value<std::vector<uint32_t>>())
+        ("canonical", "Assign one dense id per CANONICAL k-mer (SSHash-compatible: ids in [0,num_kmers)); without it, ids are per-orientation");
 
     all_actions.push_back("ftab");
     auto ftabOptions = options.add_options("ftab")
@@ -361,6 +368,7 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
                     if (result.count("multi-ftab") >= 1) { movi_options.set_multi_ftab(true); }
                     if (result.count("kmer") >= 1) { movi_options.set_kmer(); movi_options.set_prefetch(false); }
                     if (result.count("kmer-count") >= 1) { movi_options.set_kmer(); movi_options.set_kmer_count(true); movi_options.set_prefetch(false); }
+                    if (result.count("kmer-bv") >= 1) { movi_options.set_kmer_bv(true); }
                     if (result.count("mem") >= 1) { movi_options.set_mem(); }
                     if (result.count("count") >= 1) { movi_options.set_count(); }
                     if (result.count("zml") >= 1) { movi_options.set_zml(); }
@@ -525,6 +533,15 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
                     if (result.count("flat-color-vectors") == 1) { movi_options.set_flat_color_vectors(true); }
                 } else {
                     const std::string message = "Please specify the index directory file.";
+                    cxxopts::throw_or_mimic<cxxopts::exceptions::invalid_option_format>(message);
+                }
+            } else if (command == "build-kmerbv") {
+                if (result.count("index") == 1 and result.count("kmer-lengths") >= 1) {
+                    movi_options.set_index_dir(result["index"].as<std::string>());
+                    movi_options.set_build_kmerbv_ks(result["kmer-lengths"].as<std::vector<uint32_t>>());
+                    if (result.count("canonical") >= 1) { movi_options.set_kmerbv_canonical(true); }
+                } else {
+                    const std::string message = "Please specify --index and at least one --kmer-lengths value.";
                     cxxopts::throw_or_mimic<cxxopts::exceptions::invalid_option_format>(message);
                 }
             } else if (command == "ftab") {
