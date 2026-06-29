@@ -1,5 +1,8 @@
 #include "move_structure.hpp"
 
+#include <stack>
+#include <algorithm>
+
 void MoveStructure::compute_number_of_build_steps() {
     current_build_step = 1;
     total_build_steps = 4;
@@ -1123,49 +1126,80 @@ void MoveStructure::build_ftab() {
 
     uint64_t ftab_size = std::pow(4, ftab_k);
     INFO_MSG("ftab_size: " + std::to_string(ftab_size*sizeof(MoveInterval)*std::pow(10, -6)) + " MB");
+    INFO_MSG("Number of ftab entries (ftab-k=" + std::to_string(ftab_k) + "): " + std::to_string(ftab_size));
+
+    // The ftab is a DENSE table indexed by the k-mer's 2-bit code (kmer_to_number:
+    // leftmost base in the most-significant bits; A<C<G<T). Every code that is not an
+    // occurring k-mer must read as empty, so initialize the whole table to empty first
+    // (MoveInterval()'s default ctor leaves the fields uninitialized). This dense fill
+    // is memory-bandwidth-bound and cheap relative to the index walks below.
     ftab.clear();
     ftab.resize(ftab_size);
-    INFO_MSG("Number of ftab entries (ftab-k=" + std::to_string(ftab_k) + "): " + std::to_string(ftab_size));
-    for (uint64_t i = 0; i < ftab_size; i++) {
-        std::string kmer = number_to_kmer(i, 2*(ftab_k), alphabet, alphamap);
-        uint64_t kmer_code = kmer_to_number(ftab_k, kmer, 0, alphamap);
-        if (kmer_code != i) {
-            INFO_MSG(kmer + " " + std::to_string(i) + " " + std::to_string(kmer_code));
+    #pragma omp parallel for schedule(static)
+    for (uint64_t i = 0; i < ftab_size; i++) ftab[i].make_empty();
+
+    // Rather than a full ftab_k-step backward search for each of the 4^k codes (the old
+    // serial approach: ~ftab_k * 4^k move-steps on one core), enumerate only the k-mers
+    // that actually occur with a pruned DFS over the RLBWT: grow a k-mer one base at a
+    // time to the LEFT via backward_search_step, branching over A/C/G/T and pruning any
+    // branch whose interval goes empty. A depth-ftab_k node is exactly the interval the
+    // serial backward search would compute, and its accumulated 2-bit code `packed`
+    // equals kmer_to_number(kmer) (leftmost base in the high bits; bases[] index = the
+    // A<C<G<T 2-bit code), so we write ftab[packed] directly. Codes that are never
+    // visited keep the empty value set above -> identical result to the serial build.
+    //
+    // Parallelism mirrors build_kmerbv(): a cheap serial DFS down to `seed_depth`
+    // collects independent subtree roots, then an omp parallel-for DFSes each subtree on
+    // its own thread. Writes are race-free: distinct k-mers have distinct codes, hence
+    // distinct ftab[] slots (no two threads touch the same element).
+    const char bases[4] = {'A', 'C', 'G', 'T'};
+    struct Node { MoveInterval interval; uint32_t depth; uint64_t packed; };
+
+    // Phase 1 (serial): seed the parallel phase with depth-`seed_depth` subtrees.
+    const uint32_t seed_depth = std::min<uint32_t>(static_cast<uint32_t>(ftab_k), 6);
+    std::vector<Node> seeds;
+    {
+        std::stack<Node> stk;
+        for (int i = 0; i < 4; i++) {
+            char c = bases[i];  // check_alphabet takes char& (non-const)
+            if (!check_alphabet(c)) continue;
+            uint64_t ci = alphamap[static_cast<uint64_t>(c)] + 1;
+            MoveInterval iv(first_runs[ci], first_offsets[ci], last_runs[ci], last_offsets[ci]);
+            if (iv.is_empty()) continue;
+            stk.push({iv, 1, static_cast<uint64_t>(i)});  // group 0 = first (rightmost) base
         }
-        int32_t pos_on_kmer = ftab_k - 1;
-        MoveInterval interval(
-            first_runs[alphamap[kmer[pos_on_kmer]] + 1],
-            first_offsets[alphamap[kmer[pos_on_kmer]] + 1],
-            last_runs[alphamap[kmer[pos_on_kmer]] + 1],
-            last_offsets[alphamap[kmer[pos_on_kmer]] + 1]
-        );
-        MoveInterval kmer_interval = backward_search(kmer, pos_on_kmer, interval, std::numeric_limits<int32_t>::max());
-        uint64_t match_count = kmer_interval.count(rlbwt);
-        if (match_count >= 0 and pos_on_kmer == 0) {
-            if (movi_options->is_debug()) {
-                DEBUG_MSG(kmer + " " + std::to_string(match_count) + " " + kmer_interval.to_string());
+        while (!stk.empty()) {
+            Node node = stk.top();
+            stk.pop();
+            if (node.depth == seed_depth) { seeds.push_back(node); continue; }
+            for (int i = 0; i < 4; i++) {
+                MoveInterval child = node.interval;
+                if (backward_search_step(bases[i], child))  // prepend base (left-extend)
+                    stk.push({child, node.depth + 1,
+                              node.packed | (static_cast<uint64_t>(i) << (2 * node.depth))});
             }
-            // if (!(ftab[i] == kmer_interval)) {
-            //     std::cerr << "ftab[i] is different from kmer_interval: " << i << "\n";
-            //     std::cerr << ftab[i] << "\n" << kmer_interval << "\n";
-            //     exit(0);
-            // }
-            ftab[i] = kmer_interval;
-        } else {
-            if (movi_options->is_debug()) {
-                DEBUG_MSG(kmer + " not found!");
-            }
-            // if (!ftab[i].is_empty()) {
-            //     std::cerr << "ftab[i] is non-empty and different from kmer_interval: " << i << "\n";
-            //     std::cerr << ftab[i].is_empty() << "\n" << match_count << " " << (pos_on_kmer == 0) << "\n";
-            //     exit(0);
-            // }
-            ftab[i].make_empty();
         }
-        // if (pos_on_kmer != 0) pos_on_kmer += 1;
-        if (movi_options->is_debug()) {
-            DEBUG_MSG(kmer);
-            DEBUG_MSG(kmer.length() - pos_on_kmer << "/" << kmer.length() << "\t" << match_count);
+    }
+
+    INFO_MSG("Building ftab from the RLBWT via pruned parallel DFS (" +
+             std::to_string(seeds.size()) + " seeds at depth " +
+             std::to_string(seed_depth) + ")...");
+
+    // Phase 2 (parallel): each seed subtree is independent.
+    #pragma omp parallel for schedule(dynamic)
+    for (size_t s = 0; s < seeds.size(); s++) {
+        std::stack<Node> stk;
+        stk.push(seeds[s]);
+        while (!stk.empty()) {
+            Node node = stk.top();
+            stk.pop();
+            if (node.depth == ftab_k) { ftab[node.packed] = node.interval; continue; }
+            for (int i = 0; i < 4; i++) {
+                MoveInterval child = node.interval;
+                if (backward_search_step(bases[i], child))
+                    stk.push({child, node.depth + 1,
+                              node.packed | (static_cast<uint64_t>(i) << (2 * node.depth))});
+            }
         }
     }
 }
