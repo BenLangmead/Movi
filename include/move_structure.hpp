@@ -35,8 +35,12 @@
 #include "utils.hpp"
 #include "move_intervals.hpp"
 #include "doc_set.hpp"
+#include <coroutine>
 
 class Classifier;
+
+// Forward declaration for SharedFastqReader (defined in movi_co.cpp)
+class SharedFastqReader;
 
 struct ThresholdsRow {
     uint16_t values[4];
@@ -153,6 +157,13 @@ class MoveStructure {
 
         uint64_t query_pml(MoveQuery& mq);
         uint64_t query_zml(MoveQuery& mq);
+
+        // C++20 coroutine version of query_pml (latency-hiding style (c); see movi_co.cpp)
+        struct query_pml_colh_return_type;
+        query_pml_colh_return_type query_pml_colh(
+            SharedFastqReader& reader,
+            std::coroutine_handle<>& my_handle_storage,
+            int coroutine_id);
 
         uint64_t reposition_up(uint64_t idx, char c, uint64_t& scan_count);
         uint64_t reposition_down(uint64_t idx, char c, uint64_t& scan_count);
