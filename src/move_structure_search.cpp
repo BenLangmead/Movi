@@ -70,16 +70,22 @@ bool MoveStructure::extend_bidirectional(char c_, MoveInterval& fw_interval, Mov
     bool res = backward_search_step(c_, fw_interval);
     if (res) {
         // The alphabet is already checked to be legal (ACGT)
-        uint64_t skip = 0;
+        // Combined skip-count + fw_count scan over the pre-extension fw interval
+        // (one pass). skip -> how far to walk rc_interval.start forward; fw_count
+        // -> count of c_ in fw_before = count of the new fw_interval (bidirectional
+        // BWT invariant), used for the rc end walk below in place of a separate
+        // fw_interval.count(rlbwt) pass (a 3rd O(#runs) scan; ~6% of MEM query
+        // cycles per PMU profile, 2026-06-19). Mirrors movi_co.cpp's fused scan.
+        uint64_t skip = 0, fw_count = 0;
         uint64_t current_run = fw_interval_before_extension.run_start;
         uint64_t current_offset = fw_interval_before_extension.offset_start;
         while (current_run <= fw_interval_before_extension.run_end ) {
             if (current_run != end_bwt_idx) {
-                if (complement(get_char(current_run)) < c_comp) {
-                    uint64_t char_count = current_run != fw_interval_before_extension.run_end ?
-                                        get_n(current_run) - current_offset : fw_interval_before_extension.offset_end - current_offset + 1;
-                    skip += char_count;
-                }
+                char ch = get_char(current_run);
+                uint64_t char_count = current_run != fw_interval_before_extension.run_end ?
+                                    get_n(current_run) - current_offset : fw_interval_before_extension.offset_end - current_offset + 1;
+                if (complement(ch) < c_comp) skip += char_count;
+                if (ch == c_) fw_count += char_count;
             } else {
                 skip += 1;
             }
@@ -98,8 +104,9 @@ bool MoveStructure::extend_bidirectional(char c_, MoveInterval& fw_interval, Mov
                 skip -= rows_after + 1;
             }
         }
-        // Compute the run end for the rc interval
-        skip = fw_interval.count(rlbwt) - 1;
+        // Compute the run end for the rc interval (uses fw_count from the fused
+        // scan above instead of a separate fw_interval.count(rlbwt) pass).
+        skip = fw_count - 1;
         rc_interval.run_end = rc_interval.run_start;
         rc_interval.offset_end = rc_interval.offset_start;
         while (skip != 0) {
