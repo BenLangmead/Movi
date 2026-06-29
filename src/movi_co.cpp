@@ -71,8 +71,11 @@ static bool g_bpf_output = false;
 // When true (--reorder), emit reads in input order via the reorder buffer;
 // default is completion order (lower overhead, matches mainline Movi's order).
 static bool g_ordered_output = false;
+// MEM query mode (movi-co also supports --mem) and its parameters.
+static bool g_mem_query = false;
+static int  g_min_mem_length = 0;
 // k-mer query mode (movi-co also supports --kmer / --kmer-count) and its length.
-// g_ftab_k is the optional ftab depth used to skip the leading search steps.
+// g_ftab_k is the optional ftab depth used to skip the leading search steps (shared with MEM).
 static int  g_ftab_k = 0;
 static bool g_kmer_query = false;
 static bool g_kmer_count = false;
@@ -589,6 +592,244 @@ MoveStructure::query_pml_colh_return_type MoveStructure::query_pml_colh(
 }
 
 
+// Coroutine MEM query with latency hiding. Mirrors MoveStructure::query_mems /
+// query_mem_bml (min_mem_length > 1 path). Yields only at the LF destination
+// jump inside each backward/forward search step, and before ftab lookups.
+// extend_bidirectional is inlined so the single co_yield can be placed at the
+// fw LF_move; the subsequent sequential work (skip scan, rc walk) gets no yield
+// because the hardware prefetcher covers sequential rlbwt row access.
+// The skip scan also accumulates fw_count (= count of c in fw_before), replacing
+// the separate fw_interval.count(rlbwt) scan for the rc-end walk.
+MoveStructure::query_pml_colh_return_type MoveStructure::query_mem_colh(
+    SharedFastqReader& reader,
+    coroutine_handle<>& my_handle_storage,
+    int coroutine_id) {
+
+    const int32_t min_mem_length = movi_options->get_min_mem_length();
+    const size_t  ftab_k = movi_options->get_ftab_k();
+    char numbuf[24];
+    std::string out_line;
+
+    // Split backward_search_step at the LF destination jump — the only cold-miss
+    // access in search. step_prep does update_interval (sequential, hw-prefetchable)
+    // then computes and prefetches the LF destination rows. step_finish does the
+    // LF_move using the precomputed ids so the prefetched rows are exactly used.
+    uint64_t pf_id_s = 0, pf_id_e = 0;
+    auto step_prep = [&](MoveInterval& iv, char c) -> bool {
+        if (!check_alphabet(c)) { iv.make_empty(); return false; }
+        update_interval(iv, c);
+        if (iv.is_empty()) return false;
+        pf_id_s = get_id(iv.run_start);
+        pf_id_e = get_id(iv.run_end);
+        my_prefetch_r((void*)(&(rlbwt[0]) + pf_id_s));
+        my_prefetch_r((void*)(&(rlbwt[0]) + pf_id_e));
+        return true;
+    };
+    auto step_finish = [&](MoveInterval& iv) {
+        LF_move(iv.offset_start, iv.run_start, pf_id_s);
+        LF_move(iv.offset_end, iv.run_end, pf_id_e);
+    };
+
+    // Prefetch both fw and rc ftab entries before initialize_bidirectional_search.
+    auto ftab_pf_bidi = [&](std::string& qs, int32_t pos) -> bool {
+        if (ftab_k <= 1 || pos < static_cast<int32_t>(ftab_k) - 1) return false;
+        int32_t start = pos - static_cast<int32_t>(ftab_k) + 1;
+        uint64_t fw = kmer_to_number(ftab_k, qs, start, alphamap, false);
+        uint64_t rc = kmer_to_number(ftab_k, qs, start, alphamap, true);
+        bool any = false;
+        if (fw != std::numeric_limits<uint64_t>::max()) { my_prefetch_r((void*)(&(ftab[0]) + fw)); any = true; }
+        if (rc != std::numeric_limits<uint64_t>::max()) { my_prefetch_r((void*)(&(ftab[0]) + rc)); any = true; }
+        return any;
+    };
+    // Prefetch fw ftab entry before initialize_backward_search (next MEM start).
+    auto ftab_pf = [&](std::string& qs, int32_t pos) -> bool {
+        if (ftab_k <= 1 || pos < static_cast<int32_t>(ftab_k) - 1) return false;
+        uint64_t code = kmer_to_number(ftab_k, qs, pos - static_cast<int32_t>(ftab_k) + 1, alphamap);
+        if (code == std::numeric_limits<uint64_t>::max()) return false;
+        my_prefetch_r((void*)(&(ftab[0]) + code));
+        return true;
+    };
+
+    while (true) {
+        auto& read_data = co_await get_next_read(reader, my_handle_storage, coroutine_id);
+        if (!read_data.valid) break;
+
+        MoveQuery mq(std::move(read_data.sequence));
+        mq.set_query_id(read_data.name);
+        std::string& query_seq = mq.query();
+        const int32_t qlen = static_cast<int32_t>(query_seq.length());
+
+        int32_t pos_on_r = 0;
+        // Cast to size_t replicates production's `pos_on_r < query_seq.length()`
+        // (int32_t < size_t): when pos_on_r goes negative after a MEM that reaches
+        // end-of-read, the cast wraps to SIZE_MAX > qlen and the loop exits.
+        while (static_cast<size_t>(pos_on_r) < static_cast<size_t>(qlen)) {
+            // ---- query_mem_bml(pos_on_r) inlined with prefetch + co_yield ----
+            if (pos_on_r + min_mem_length > qlen) { pos_on_r = qlen; break; }
+
+            uint64_t match_len = 0;
+            int32_t init_pos = pos_on_r + min_mem_length - 1;
+
+            // Prefetch both ftab entries before the cold bidirectional initialization.
+            if (ftab_pf_bidi(query_seq, init_pos)) co_yield monostate{};
+            MoveBiInterval bi_interval = initialize_bidirectional_search(mq, init_pos, match_len);
+            bool ftab_skip = match_len <= 1 && ftab_k <= static_cast<size_t>(min_mem_length);
+            --init_pos;
+
+            // Prefetch fw_interval entry-point rows so the first update_interval
+            // in the left-extension loop doesn't stall on a cold ftab-seeded interval.
+            if (!ftab_skip && match_len > 1 && !bi_interval.fw_interval.is_empty()) {
+                my_prefetch_r((void*)(&(rlbwt[0]) + bi_interval.fw_interval.run_start));
+                my_prefetch_r((void*)(&(rlbwt[0]) + bi_interval.fw_interval.run_end));
+                co_yield monostate{};
+            }
+
+            bool failed = false;
+            if (ftab_skip) {
+                // ftab can't seed bidirectional; pure backward search to find pos_on_r.
+                MoveInterval fw_interval = bi_interval.fw_interval;
+                for (size_t j = 0; j <= static_cast<size_t>(init_pos - pos_on_r); ++j) {
+                    if (!step_prep(fw_interval, query_seq[init_pos - j])) {
+                        pos_on_r = init_pos - j + 1; failed = true; break;
+                    }
+                    co_yield monostate{};
+                    step_finish(fw_interval);
+                    ++match_len;
+                }
+                if (!failed) throw std::runtime_error("Extended past failed ftab");
+            } else {
+                // Left extension: extend_bidirectional inlined so co_yield is placed
+                // only at the LF jump on fw_interval. Sequential scan and rc walk
+                // follow step_finish with no yield.
+                for (size_t j = 0; j <= static_cast<size_t>(init_pos - pos_on_r); ++j) {
+                    char c_ = query_seq[init_pos - j];
+                    char c_comp = complement(c_);
+
+                    MoveInterval fw_before = bi_interval.fw_interval;
+
+                    if (!step_prep(bi_interval.fw_interval, c_)) {
+                        pos_on_r = init_pos - j + 1; failed = true; break;
+                    }
+                    co_yield monostate{};   // hide LF destination miss on fw
+                    step_finish(bi_interval.fw_interval);
+
+                    // Combined skip-count + fw_count scan over fw_before (one pass).
+                    // skip  → how far to walk rc_interval.start forward.
+                    // fw_count → count of c_ in fw_before = count of new fw_interval
+                    //            (bidirectional BWT invariant), used for rc end walk
+                    //            instead of a separate fw_interval.count(rlbwt) call.
+                    uint64_t skip = 0, fw_count = 0;
+                    uint64_t cur = fw_before.run_start;
+                    uint64_t cur_off = fw_before.offset_start;
+                    while (cur <= fw_before.run_end) {
+                        if (cur != end_bwt_idx) {
+                            char ch = get_char(cur);
+                            uint64_t n = (cur != fw_before.run_end) ?
+                                get_n(cur) - cur_off :
+                                fw_before.offset_end - cur_off + 1;
+                            if (complement(ch) < c_comp) skip += n;
+                            if (ch == c_) fw_count += n;
+                        } else {
+                            skip += 1;
+                        }
+                        ++cur;
+                        cur_off = 0;
+                    }
+
+                    // Walk rc_interval.start forward by skip.
+                    MoveInterval& rc = bi_interval.rc_interval;
+                    while (skip != 0) {
+                        uint64_t rows_after = get_n(rc.run_start) - 1 - rc.offset_start;
+                        if (rows_after >= skip) {
+                            rc.offset_start += skip;
+                            skip = 0;
+                        } else {
+                            rc.run_start += 1;
+                            rc.offset_start = 0;
+                            skip -= rows_after + 1;
+                        }
+                    }
+
+                    // Walk rc_interval.end to rc_interval.start + (fw_count - 1).
+                    rc.run_end = rc.run_start;
+                    rc.offset_end = rc.offset_start;
+                    uint64_t fw_skip = fw_count - 1;
+                    while (fw_skip != 0) {
+                        uint64_t rows_after = get_n(rc.run_end) - 1 - rc.offset_end;
+                        if (rows_after >= fw_skip) {
+                            rc.offset_end += fw_skip;
+                            fw_skip = 0;
+                        } else {
+                            rc.run_end += 1;
+                            rc.offset_end = 0;
+                            fw_skip -= rows_after + 1;
+                        }
+                    }
+
+                    bi_interval.match_len += 1;
+                    ++match_len;
+                }
+            }
+            if (failed) continue;
+
+            // Forward extension: find right end of MEM (exclusive).
+            // forward_search_step(c, iv) == backward_search_step(complement(c), iv).
+            MoveInterval rc_interval = bi_interval.rc_interval;
+            MoveInterval rc_before = rc_interval;
+            size_t i;
+            for (i = static_cast<size_t>(pos_on_r) + min_mem_length;
+                 i < static_cast<size_t>(qlen); ++i) {
+                rc_before = rc_interval;
+                if (!step_prep(rc_interval, complement(query_seq[i]))) {
+                    rc_interval = rc_before; break;
+                }
+                co_yield monostate{};       // hide LF destination miss on rc
+                step_finish(rc_interval);
+                ++match_len;
+            }
+
+            mq.add_mem(pos_on_r, i, rc_interval.count(rlbwt));
+
+            // Backward extension to find next candidate MEM's left end.
+            size_t end_pos_on_r = i;
+            if (end_pos_on_r < static_cast<size_t>(qlen)) {
+                init_pos = static_cast<int32_t>(end_pos_on_r);
+                match_len = 0;
+                if (ftab_pf(query_seq, init_pos)) co_yield monostate{};
+                MoveInterval fw_interval = initialize_backward_search(mq, init_pos, match_len);
+                ++match_len;
+                --init_pos;
+                for (i = 0; i <= static_cast<size_t>(init_pos - (pos_on_r + 1)); ++i) {
+                    if (!step_prep(fw_interval, query_seq[init_pos - i])) break;
+                    co_yield monostate{};   // hide LF destination miss on fw
+                    step_finish(fw_interval);
+                    ++match_len;
+                }
+            }
+            // When end_pos_on_r >= qlen the else branch is skipped (matching
+            // the reference), leaving i == qlen from the forward loop so that
+            // pos_on_r = init_pos - qlen + 1 goes negative; the size_t cast in
+            // the outer while condition then terminates the loop correctly.
+            pos_on_r = (init_pos - static_cast<int32_t>(i)) + 1;
+        }
+
+        // Emit this read's MEMs (id \t start \t end \t count), one per line.
+        out_line.clear();
+        for (auto& m : mq.get_mems()) {
+            out_line.append(mq.get_query_id());
+            out_line.push_back('\t');
+            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.start));
+            out_line.push_back('\t');
+            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.end));
+            out_line.push_back('\t');
+            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.count));
+            out_line.push_back('\n');
+        }
+        g_emitter.emit(read_data.seq, out_line);
+    }
+    co_return;
+}
+
 // Coroutine k-mer query with latency hiding. Mirrors MoveStructure::query_all_kmers
 // (together with query_kmers_from and look_ahead_backward_search) exactly -- both
 // skip heuristics included -- so output is byte-identical to production
@@ -804,7 +1045,12 @@ MoveStructure::query_pml_colh_return_type MoveStructure::query_kmer_colh(
 void process_fastq(const string& fastq_file, const string& index_dir, int concurrency) {
     MoviOptions movi_options;
     movi_options.set_index_dir(index_dir);
-    if (g_kmer_query) {
+    if (g_mem_query) {
+        movi_options.set_mem();
+        movi_options.set_ftab_k(static_cast<uint32_t>(g_ftab_k));
+        movi_options.set_min_mem_length(static_cast<uint32_t>(g_min_mem_length));
+        movi_options.set_multi_ftab(false);
+    } else if (g_kmer_query) {
         movi_options.set_kmer();
         movi_options.set_kmer_count(g_kmer_count);
         movi_options.set_kmer_bv(g_kmer_bv);
@@ -817,14 +1063,14 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
 
     MoveStructure mv(&movi_options);
     mv.deserialize();
-    if (g_kmer_query && g_ftab_k > 1) mv.read_ftab();
+    if ((g_mem_query && g_ftab_k > 0) || (g_kmer_query && g_ftab_k > 1)) mv.read_ftab();
     // Run-local k-mer count structure C_k: only for the --kmer-bv path; loaded once.
     if (g_kmer_query && g_kmer_bv) mv.load_kmerbv(static_cast<uint32_t>(g_k));
     fprintf(stderr_buf, "Successfully loaded Movi index from: %s\n", index_dir.c_str());
 
     // PML/text/BPF header only applies to the PML output; k-mer emits its own
     // tab-delimited lines with no header.
-    if (!g_kmer_query) {
+    if (!g_mem_query && !g_kmer_query) {
         if (g_bpf_output) {
             BPFHeader header;
             header.init(16);  // matching lengths are stored as 16-bit values
@@ -848,7 +1094,9 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     
     // Initialize all coroutines - use move semantics
     for (int i = 0; i < concurrency; ++i) {
-        if (g_kmer_query)
+        if (g_mem_query)
+            coroutines.push_back(std::move(mv.query_mem_colh(reader, waiting_handles[i], i)));
+        else if (g_kmer_query)
             coroutines.push_back(std::move(mv.query_kmer_colh(reader, waiting_handles[i], i)));
         else
             coroutines.push_back(std::move(mv.query_pml_colh(reader, waiting_handles[i], i)));
@@ -933,6 +1181,7 @@ void print_usage(const char* program_name) {
     fprintf(stderr_buf, "  --debug:     Enable debug output\n");
     fprintf(stderr_buf, "  --bpf:       Write binary BPF output (like mainline Movi) instead of text\n");
     fprintf(stderr_buf, "  --reorder:   Emit reads in input order (enable the reorder buffer; default is completion order)\n");
+    fprintf(stderr_buf, "  --mem --ftab-k N --min-mem-length N:  MEM query mode\n");
     fprintf(stderr_buf, "  --kmer | --kmer-count, -k/--k-length N [--ftab-k N]:  k-mer query mode\n");
     fprintf(stderr_buf, "               (default query mode is PML)\n");
     fprintf(stderr_buf, "  fastq_file: Input FASTQ file with reads\n");
@@ -957,16 +1206,22 @@ int main(int argc, char* argv[]) {
         if (flag == "--debug") { debug_enabled = true; }
         else if (flag == "--bpf") { g_bpf_output = true; }
         else if (flag == "--reorder") { g_ordered_output = true; }
+        else if (flag == "--mem") { g_mem_query = true; }
         else if (flag == "--kmer") { g_kmer_query = true; }
         else if (flag == "--kmer-count") { g_kmer_query = true; g_kmer_count = true; }
         else if (flag == "--kmer-bv") { g_kmer_bv = true; }
         else if (flag == "-k" || flag == "--k-length") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_k = std::stoi(argv[++arg_idx]); }
         else if (flag == "--ftab-k") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_ftab_k = std::stoi(argv[++arg_idx]); }
+        else if (flag == "--min-mem-length") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_min_mem_length = std::stoi(argv[++arg_idx]); }
         else { fprintf(stderr_buf, "Unknown flag: %s\n", flag.c_str()); print_usage(argv[0]); return 1; }
         arg_idx++;
     }
 
     // Validate query-mode flag combinations.
+    if (g_mem_query && g_kmer_query) {
+        fprintf(stderr_buf, "Error: --mem and --kmer/--kmer-count are mutually exclusive\n");
+        return 1;
+    }
     if (g_kmer_query && g_k < 1) {
         fprintf(stderr_buf, "Error: --kmer/--kmer-count requires -k/--k-length N (N >= 1)\n");
         return 1;
