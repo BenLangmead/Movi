@@ -381,6 +381,12 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                 kmer_stats.positive_kmers += found;
                 #pragma omp atomic
                 kmer_stats.total_counts += kmer_count;
+            } else if (movi_options->is_kmer_bv()) {
+                // Fast keep-going MPHF-id walk: positive-skip presence plus each
+                // present k-mer's canonical id (lazy-rc inside) and orientation.
+                uint64_t found = query_kmers_id_bv(mq, pos_on_r);
+                #pragma omp atomic
+                kmer_stats.positive_kmers += found;
             } else {
                 uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r);
                 // Outputing the kmer matches only works for the non-count mode (for now)
@@ -441,6 +447,87 @@ uint64_t MoveStructure::query_kmers_count_bv(MoveQuery& mq, int32_t& pos_on_r) {
         kmer_stats.positive_skipped += kmers_found - 1;
         // pos_on_r is the leftmost resolved k-mer's start; the next k-mer to
         // process ends at pos_on_r + k - 2 (mirrors query_kmers_from).
+        pos_on_r = pos_on_r + k - 2;
+    } else {
+        pos_on_r = pos_on_r_saved - 1;
+    }
+    return kmers_found;
+}
+
+// MPHF id via the fast presence positive-skip walk (same keep-going structure as
+// query_kmers_count_bv), emitting each present k-mer's canonical id. Needs only
+// B_k + all_p -- NO count structure: for a present k-mer the walk's (subset)
+// interval [lb_row..] sits inside the k-mer's group, and the k-mer's own B_k mark
+// is the only 1 in that group, so id = rank(lb_row + 1) - 1 regardless of how much
+// the match overshot k. Canonical mode: a canonical k-mer uses lb_row directly; a
+// non-canonical k-mer's id comes from an ftab-assisted rc search (lazy-rc). This
+// keeps the positive-skip heuristic that makes presence fast, unlike the per-k-mer
+// single search the default --kmer-bv path uses.
+uint64_t MoveStructure::query_kmers_id_bv(MoveQuery& mq, int32_t& pos_on_r) {
+    size_t ftab_k = movi_options->get_ftab_k();
+    int32_t k = static_cast<int32_t>(movi_options->get_k());
+    auto& query_seq = mq.query();
+    int32_t pos_on_r_saved = pos_on_r;
+
+    uint64_t match_len = 0;
+    MoveInterval interval;
+    do {
+        interval = initialize_backward_search(mq, pos_on_r, match_len);
+        if (match_len == 0 and ftab_k > 1) {
+            pos_on_r -= 1;
+            pos_on_r_saved = pos_on_r;
+        }
+    } while (match_len == 0 and pos_on_r >= k - 1 and ftab_k > 1);
+
+    if (interval.is_empty()) {
+        pos_on_r = pos_on_r_saved - 1;
+        return 0;
+    }
+
+    const int32_t anchor = pos_on_r_saved;
+    uint64_t kmers_found = 0;
+    while (true) {
+        if (anchor - pos_on_r + 1 >= k) {
+            // id from (run, offset): the walk's subset interval sits in the k-mer's
+            // group, so kmerbv_id() = rank(addr+1)-1 yields the k-mer's id.
+            uint64_t id_run = interval.run_start, id_off = interval.offset_start;
+            int orientation = -1;
+            if (kmerbv_is_canonical) {
+                std::string xstr = query_seq.substr(pos_on_r, k);
+                std::string rcstr = reverse_complement(xstr);
+                if (xstr <= rcstr) {
+                    orientation = 0;  // canonical: use the forward (subset) interval
+                } else {
+                    MoveQuery rcq(rcstr);
+                    int32_t rp = k - 1; uint64_t rml = 0;
+                    MoveInterval rc_iv = initialize_backward_search(rcq, rp, rml);
+                    rc_iv = backward_search(rcq.query(), rp, rc_iv,
+                                            std::numeric_limits<int32_t>::max());
+                    if (!rc_iv.is_empty()) {
+                        id_run = rc_iv.run_start; id_off = rc_iv.offset_start;
+                        orientation = 1;
+                    } else {
+                        orientation = 0;
+                    }
+                }
+            }
+            uint64_t kmer_id = kmerbv_id(id_run, id_off);
+            mq.add_kmer(pos_on_r, /*present=*/1, kmer_id,
+                        std::numeric_limits<uint64_t>::max(), orientation);
+            kmers_found += 1;
+        }
+        if (pos_on_r <= 0) break;
+        MoveInterval prev = interval;
+        if (!backward_search_step(query_seq[pos_on_r - 1], interval)) {
+            interval = prev;
+            break;
+        }
+        pos_on_r -= 1;
+    }
+
+    if (kmers_found > 0) {
+        #pragma omp atomic
+        kmer_stats.positive_skipped += kmers_found - 1;
         pos_on_r = pos_on_r + k - 2;
     } else {
         pos_on_r = pos_on_r_saved - 1;

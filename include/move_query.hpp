@@ -11,11 +11,29 @@ class MoveQuery {
         std::string& query() { return query_string; }
         uint64_t length() { return query_string.length(); }
 
-        void add_kmer(int32_t pos_on_r, uint64_t kmer_count) {
-            // We use the same variable used for stroing matching lengths to store the kmer matches
+        // orientation: -1 = unknown/not-applicable (no MPHF id); 0 = the k-mer is
+        // canonical as written (forward), 1 = its reverse complement is canonical.
+        // When an MPHF id is supplied it is emitted as a 3rd ':'-field and the
+        // orientation as a 4th (':f' / ':r'), matching SSHash's lookup_result.
+        void add_kmer(int32_t pos_on_r, uint64_t kmer_count,
+                      uint64_t kmer_id = std::numeric_limits<uint64_t>::max(),
+                      uint64_t display_count = std::numeric_limits<uint64_t>::max(),
+                      int orientation = -1) {
+            // We use the same variable used for storing matching lengths to store the kmer matches
             if (kmer_count > 0) {
                 found_kmer_count += kmer_count;
-                matching_lengths_string += std::to_string(pos_on_r) + ":" + std::to_string(kmer_count) + " ";
+                uint64_t shown = (display_count != std::numeric_limits<uint64_t>::max())
+                                 ? display_count : kmer_count;
+                if (kmer_id != std::numeric_limits<uint64_t>::max()) {
+                    matching_lengths_string += std::to_string(pos_on_r) + ":" +
+                                               std::to_string(shown) + ":" +
+                                               std::to_string(kmer_id);
+                    if (orientation >= 0)
+                        matching_lengths_string += (orientation == 0 ? ":f" : ":r");
+                    matching_lengths_string += " ";
+                } else {
+                    matching_lengths_string += std::to_string(pos_on_r) + ":" + std::to_string(shown) + " ";
+                }
             }
         }
 

@@ -202,6 +202,7 @@ class MoveStructure {
         uint64_t query_kmers_from_bidirectional(MoveQuery& mq, int32_t& pos_on_r);
         uint64_t query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single = false, MoveInterval* interval_out = nullptr);
         uint64_t query_kmers_count_bv(MoveQuery& mq, int32_t& pos_on_r);
+        uint64_t query_kmers_id_bv(MoveQuery& mq, int32_t& pos_on_r);
 /*******  End of functions implemented in query_kmer.cpp  ***********/
 /***************************************************************************/
 
@@ -455,6 +456,21 @@ class MoveStructure {
         // (not per LF step). Trades a sampled-position RSS factor for that walk.
         sdsl::int_vector<> kmerbv_allp_ckpt;   // all_p at runs 0, S, 2S, ... (sampled)
         uint64_t kmerbv_allp_S = 0;            // checkpoint stride in runs; 0 => not built
+        // Exact absolute row of run head `run` = nearest checkpoint + sum of the
+        // intervening run lengths (get_n is in RAM, so all_p is never stored).
+        inline uint64_t reconstruct_allp(uint64_t run) {
+            uint64_t base = run - (run % kmerbv_allp_S);
+            uint64_t p = kmerbv_allp_ckpt[run / kmerbv_allp_S];
+            for (uint64_t j = base; j < run; ++j) p += get_n(j);
+            return p;
+        }
+        // MPHF id of the k-mer whose interval starts at (run, offset): id =
+        // rank(lb+1)-1 with lb = all_p[run]+offset. Holds for an exact OR a subset
+        // interval (the k-mer's mark is the only 1 in its group).
+        inline uint64_t kmerbv_id(uint64_t run, uint64_t offset) {
+            uint64_t lb = reconstruct_allp(run) + offset;
+            return kmerbv_sd_rank(lb + 1) - 1;
+        }
         // From kmerbv.<k>.meta: whether B_k marks only CANONICAL k-mers (ids in
         // [0,num_kmers), SSHash-compatible) and the num_kmers (= ones in B_k).
         bool kmerbv_is_canonical = false;
