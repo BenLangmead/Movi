@@ -84,11 +84,8 @@ void close_kseq(kseq_t *seq, gzFile& fp) {
     gzclose(fp); // STEP 6: close the file handler
 }
 
-char complement(char c) {
-    // # is the separator, complement(#) = #
-    char c_comp = c == SEPARATOR? SEPARATOR : (c == 'A' ? 'T' : ( c == 'C' ? 'G' : (c == 'G' ? 'C' : 'A')));
-    return c_comp;
-}
+// complement() is now an inline lookup-table function in utils.hpp (was ~25% of
+// MEM query cycles as an out-of-line nested-ternary; PMU profile 2026-06-19).
 
 std::string reverse_complement(std::string& fw) {
     std::string rc = "";
