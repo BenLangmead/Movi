@@ -25,7 +25,7 @@ set(MOVI_SOURCES
     move_row_colored.cpp
     read_processor.cpp
     utils.cpp
-    sequitur.cpp
+    query_kmer.cpp
     mem_finder.cpp
     emperical_null_database.cpp
     movi_parser.cpp
