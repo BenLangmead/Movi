@@ -141,7 +141,8 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
         ("classify", "Enable binary classification of the reads")
         ("filter", "Filter the reads based on the matching lengths, output the filtered reads to stdout")
         ("v,invert", "Output the not found reads during filtering")
-        ("stdout", "Write the output to stdout, writes the matching lengths by default, or the report of classification if --classify is passed");
+        ("stdout", "Write the output to stdout, writes the matching lengths by default, or the report of classification if --classify is passed")
+        ("batch", "Load the index once, then read one query spec per line from stdin (each: the per-query options minus --index) and run each against the resident index");
 
     // Advanced query options (hidden by default, shown with --help-all)
     auto queryAdvancedOptions = options.add_options("query (advanced)")
@@ -347,9 +348,11 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
                     cxxopts::throw_or_mimic<cxxopts::exceptions::invalid_option_format>(message);
                 }
             } else if (command == "query") {
-                if (result.count("index") == 1 and result.count("read") == 1) {
+                // In --batch mode the read file comes per-spec from stdin, so a
+                // top-level --read is not required (only --index is).
+                if (result.count("index") == 1 and (result.count("read") == 1 or result.count("batch") >= 1)) {
                     movi_options.set_index_dir(result["index"].as<std::string>());
-                    movi_options.set_read_file(result["read"].as<std::string>());
+                    if (result.count("read") == 1) { movi_options.set_read_file(result["read"].as<std::string>()); }
                     if (result.count("out-file")) { movi_options.set_out_file(result["out-file"].as<std::string>()); }
                     if (result.count("k") >= 1) { movi_options.set_k(static_cast<uint32_t>(result["k"].as<uint32_t>())); }
                     if (result.count("min-mem-length") >= 1) { movi_options.set_min_mem_length(static_cast<uint32_t>(result["min-mem-length"].as<uint32_t>())); }
@@ -438,6 +441,9 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
                     if (result.count("stdout")) {
                         // Set global verbose flag
                         movi_options.set_stdout(true);
+                    }
+                    if (result.count("batch")) {
+                        movi_options.set_batch(true);
                     }
                     if (result.count("no-output")) {
                         movi_options.set_no_output(true);

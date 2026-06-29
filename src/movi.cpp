@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <cstdio>
 #include <chrono>
+#include <sstream>
 #include <cstddef>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -570,6 +571,33 @@ void build_rlbwt(MoviOptions& movi_options) {
     SUCCESS_MSG("The rlbwt is successfully stored at \n" + movi_options.get_bwt_file() + ".heads and \n" + movi_options.get_bwt_file() + ".len");
 }
 
+// Batch driver: the index is already loaded in mv_. Read one query spec per line
+// from stdin -- each line holding the per-query options (mode, --read, params)
+// minus --index -- parse it into a fresh MoviOptions, and run it against the
+// resident index. This amortizes the (large) index load over many queries.
+void run_batch(MoveStructure& mv_, MoviOptions& base_options) {
+    const std::string index_dir = base_options.get_index_dir();
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.find_first_not_of(" \t\r\n") == std::string::npos) continue;  // blank
+        std::vector<std::string> toks = {"movi", "query", "--index", index_dir};
+        std::istringstream iss(line);
+        std::string tok;
+        while (iss >> tok) toks.push_back(tok);
+        std::vector<char*> argv;
+        for (auto& s : toks) argv.push_back(const_cast<char*>(s.c_str()));
+        MoviOptions per_options;
+        if (!parse_command(static_cast<int>(argv.size()), argv.data(), per_options, true)) {
+            WARNING_MSG("batch: could not parse query spec, skipping: " + line);
+            continue;
+        }
+        // mv_ holds a pointer to its options; point it at this spec's options so
+        // query paths that read mv_->movi_options see the per-spec mode/params.
+        mv_.set_movi_options(&per_options);
+        query(mv_, per_options);
+    }
+}
+
 int main(int argc, char** argv) {
 
     try {
@@ -665,8 +693,9 @@ int main(int argc, char** argv) {
 
             color(mv_, movi_options);
         } else if (command == "query") {
-            // Check if the input file exists
-            if (movi_options.get_read_file() != "-" and !std::filesystem::exists(movi_options.get_read_file())) {
+            // Check if the input file exists (in --batch mode the read files come
+            // per-spec from stdin and are validated as each query is set up).
+            if (!movi_options.is_batch() and movi_options.get_read_file() != "-" and !std::filesystem::exists(movi_options.get_read_file())) {
                 throw std::runtime_error(ERROR_MSG("The input file " + movi_options.get_read_file() + " does not exist."));
             }
 
@@ -695,7 +724,11 @@ int main(int argc, char** argv) {
                 }
             }
 
-            query(mv_, movi_options);
+            if (movi_options.is_batch()) {
+                run_batch(mv_, movi_options);
+            } else {
+                query(mv_, movi_options);
+            }
 
             // Avoid taking too long for dealloction of large data structures at the end of the program
             std::quick_exit(0);

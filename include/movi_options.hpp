@@ -44,6 +44,8 @@ class MoviOptions {
         bool is_kmer() { return kmer_query; }
         bool is_kmer_count() { return kmer_count; }
         bool is_mem() { return mem_query; }
+        bool is_batch() { return batch_mode; }
+        void set_batch(bool v) { batch_mode = v; }
         bool is_reverse() { return reverse; }
         bool is_multi_ftab() { return multi_ftab; }
         bool is_classify() { return classify; }
@@ -292,6 +294,7 @@ class MoviOptions {
         bool freq_compressed = false;
         bool tree_compressed = false;
         bool color_move_rows = false;
+        bool batch_mode = false;
         bool color = false;
         bool doc_sets_vector_of_vectors = false;
         bool flat_color_vectors = false;

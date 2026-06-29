@@ -47,6 +47,10 @@ class MoveStructure {
         MoveStructure(MoviOptions* movi_options_);
         MoveStructure(MoviOptions* movi_options_, uint16_t nt_splitting_, bool constant_);
 
+        // Re-point the options without rebuilding: used by the batch query driver,
+        // which loads the index once and then runs each per-spec options object.
+        void set_movi_options(MoviOptions* o) { movi_options = o; }
+
         std::vector<MoveRow> get_rlbwt();
         char get_char(uint64_t idx);
         uint64_t get_n(uint64_t idx);
