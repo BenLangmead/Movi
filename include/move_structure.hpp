@@ -32,7 +32,7 @@
 #include "move_row_colored.hpp"
 #include "move_query.hpp"
 #include "query_kmer.hpp"
-#include "mem_finder.hpp"
+#include "query_mem.hpp"
 #include "utils.hpp"
 #include "move_intervals.hpp"
 #include "doc_set.hpp"
