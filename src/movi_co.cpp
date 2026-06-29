@@ -43,6 +43,7 @@
 #include <stdexcept>
 #include <mutex>
 #include <cstring>
+#include <map>
 
 #include <sdsl/int_vector.hpp>
 #include <zlib.h>
@@ -147,6 +148,57 @@ static std::mutex output_mutex;
 // Flush interval for periodic flushing
 static constexpr int FLUSH_INTERVAL = 100;  // Flush every 100 lines
 
+// In-order, chunked output emitter. Coroutines finish reads out of order; this
+// buffers completed lines and writes them in input (read) order, so downstream
+// tools see the same order as the input. Single-threaded (the scheduler resumes
+// one coroutine at a time), so no locking is needed.
+static constexpr size_t OUTPUT_BUFFER_SIZE = 65536;
+struct OrderedEmitter {
+    uint64_t next_emit = 0;
+    std::map<uint64_t, std::string> pending;  // completed lines awaiting their turn
+    char buf[OUTPUT_BUFFER_SIZE];
+    size_t pos = 0;
+
+    void flush_chunk() {
+        if (pos > 0) { fwrite(buf, 1, pos, stdout_buf); pos = 0; }
+    }
+    void write_line(const std::string& line) {
+        if (line.size() > OUTPUT_BUFFER_SIZE) {
+            flush_chunk();
+            fwrite(line.data(), 1, line.size(), stdout_buf);
+        } else {
+            if (pos + line.size() > OUTPUT_BUFFER_SIZE) flush_chunk();
+            std::memcpy(buf + pos, line.data(), line.size());
+            pos += line.size();
+        }
+    }
+    // Emit the line for read 'seq'. Writes immediately if it is the next read in
+    // input order, then drains any consecutive buffered lines; otherwise buffers
+    // a copy until the earlier reads complete.
+    void emit(uint64_t seq, const std::string& line) {
+        if (seq == next_emit) {
+            write_line(line);
+            ++next_emit;
+            auto it = pending.find(next_emit);
+            while (it != pending.end()) {
+                write_line(it->second);
+                pending.erase(it);
+                ++next_emit;
+                it = pending.find(next_emit);
+            }
+        } else {
+            pending.emplace(seq, line);  // copy: only for out-of-order completions
+        }
+    }
+    void finish() {
+        for (auto& kv : pending) write_line(kv.second);
+        pending.clear();
+        flush_chunk();
+        fflush(stdout_buf);
+    }
+};
+static OrderedEmitter g_emitter;
+
 // Shared reader that parses FASTQ/A records in batches and hands them to
 // coroutines through per-coroutine slots. The hot path neither parses one
 // record at a time nor copies each read: the scheduler moves a record from the
@@ -159,6 +211,7 @@ public:
         bool valid = false;
         string name;
         string sequence;
+        uint64_t seq = 0;          // input-order index, assigned when served
     };
 
 private:
@@ -167,6 +220,7 @@ private:
     std::vector<ReadData> batch;   // current batch of parsed records
     size_t batch_pos = 0;          // next unserved record within batch
     std::vector<ReadData> slots;   // one slot per coroutine (zero-copy handoff)
+    uint64_t served_ = 0;          // monotonic read index, for in-order output
     static constexpr size_t BATCH_N = 256;
 
     // Parse up to BATCH_N records in a tight loop. This amortizes the kseq
@@ -212,6 +266,7 @@ public:
         if (batch_pos >= batch.size()) refill();
         if (batch_pos >= batch.size()) { slots[id].valid = false; return false; }
         slots[id] = std::move(batch[batch_pos++]);
+        slots[id].seq = served_++;
         return true;
     }
 
@@ -321,12 +376,6 @@ MoveStructure::query_pml_colh_return_type MoveStructure::query_pml_colh(
     const bool use_separator = this->use_separator();
     const int sep_adjust = use_separator ? 1 : 0;
     
-    // Per-coroutine output buffer (64KB should be enough for many lines)
-    static constexpr size_t OUTPUT_BUFFER_SIZE = 65536;
-    char output_buffer[OUTPUT_BUFFER_SIZE];
-    size_t buffer_pos = 0;
-    int buffer_line_count = 0;
-
     // Per-coroutine work buffers reused across reads (cleared, not reallocated,
     // each read) so there is no per-read heap churn.
     std::vector<uint16_t> matching_lens;
@@ -503,29 +552,11 @@ MoveStructure::query_pml_colh_return_type MoveStructure::query_pml_colh(
         }
         out_line.push_back('\n');
 
-        // Emit: flush the shared buffer if the line wouldn't fit; write
-        // oversized lines directly so nothing is ever truncated.
-        if (out_line.size() > OUTPUT_BUFFER_SIZE) {
-            std::lock_guard<std::mutex> lock(output_mutex);
-            if (buffer_pos > 0) { fwrite(output_buffer, 1, buffer_pos, stdout_buf); buffer_pos = 0; }
-            fwrite(out_line.data(), 1, out_line.size(), stdout_buf);
-        } else {
-            if (buffer_pos + out_line.size() > OUTPUT_BUFFER_SIZE) {
-                std::lock_guard<std::mutex> lock(output_mutex);
-                fwrite(output_buffer, 1, buffer_pos, stdout_buf);
-                buffer_pos = 0;
-            }
-            std::memcpy(output_buffer + buffer_pos, out_line.data(), out_line.size());
-            buffer_pos += out_line.size();
-        }
+        // Hand the completed line to the in-order emitter: it writes now if this
+        // is the next read in input order, otherwise buffers a copy until the
+        // earlier reads finish. (out_line is reused across reads.)
+        g_emitter.emit(read_data.seq, out_line);
         DEBUG_MSG_CO("DEBUG: Coroutine %d finished processing read %d, looping back\n", coroutine_id, read_count);
-    }
-    
-    // Final flush of any remaining buffered output before returning
-    if (buffer_pos > 0) {
-        std::lock_guard<std::mutex> lock(output_mutex);
-        fwrite(output_buffer, 1, buffer_pos, stdout_buf);
-        fflush(stdout_buf);
     }
     
     co_return;
@@ -608,6 +639,9 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     fprintf(stderr_buf, "Scheduler completed: %d iterations, %d reads served to coroutines\n", 
             iteration, total_reads_served);
     
+    // Emit any buffered output in input order and flush (part of the timed region).
+    g_emitter.finish();
+
     // Calculate final statistics
     auto end_time = steady_clock::now();
     double total_elapsed = duration_cast<duration<double>>(end_time - start_time).count();
