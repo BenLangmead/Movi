@@ -146,8 +146,6 @@ uint8_t F_char(std::vector<uint64_t>& first_runs, uint64_t run) {
 }
 
 void read_thresholds(std::string tmp_filename, std::vector<uint64_t>& thresholds) {
-    // Read the 5 Bytes thresholds to uin64_t variables
-
     struct stat filestat;
     FILE *fd;
 
@@ -158,11 +156,55 @@ void read_thresholds(std::string tmp_filename, std::vector<uint64_t>& thresholds
     if (fstat(fn, &filestat) < 0) {
         throw std::runtime_error(ERROR_MSG("[read_thresholds] stat() file " + tmp_filename + " failed"));
     }
-    if (filestat.st_size % THRBYTES != 0) {
+    uint64_t file_size = static_cast<uint64_t>(filestat.st_size);
+
+    // Autodetect the self-describing "TLTHR v1" format written by TeraLCP: a 32-byte
+    // header (magic, field width, flags, record count) then `count` little-endian
+    // records of `width` bytes. Positions are stored losslessly at the declared
+    // width, so no overflow reconstruction is needed (handles n >= 2^40 correctly).
+    static const unsigned char THR_MAGIC[8] = {0x93, 'T', 'L', 'T', 'H', 'R', 0x00, 0x01};
+    unsigned char hdr[32];
+    bool wide = false;
+    if (file_size >= 32 && fread(hdr, 1, 32, fd) == 32) {
+        wide = true;
+        for (int k = 0; k < 8; ++k) if (hdr[k] != THR_MAGIC[k]) { wide = false; break; }
+    }
+    if (wide) {
+        unsigned width = hdr[8];
+        unsigned char flags = hdr[9];
+        uint64_t count = 0;
+        for (int k = 0; k < 8; ++k) count |= static_cast<uint64_t>(hdr[12 + k]) << (8 * k);
+        if (width < 1 || width > 8)
+            throw std::runtime_error(ERROR_MSG("[read_thresholds] unsupported field width in " + tmp_filename));
+        if (!(flags & 0x1))
+            throw std::runtime_error(ERROR_MSG("[read_thresholds] non-little-endian thresholds unsupported in " + tmp_filename));
+        if (file_size != 32 + count * width)
+            throw std::runtime_error(ERROR_MSG("[read_thresholds] size mismatch in " + tmp_filename));
+        thresholds.resize(count);
+        for (uint64_t i = 0; i < count; ++i) {
+            if (count > 0 and (i % 1000000 == 0 or i == count - 1))
+                print_progress_bar(i, count - 1, "Reading thresholds");
+            uint64_t v = 0;
+            if (fread(&v, width, 1, fd) != 1)
+                throw std::runtime_error(ERROR_MSG("[read_thresholds] fread() file " + tmp_filename + " failed"));
+            thresholds[i] = v;
+        }
+        SUCCESS_MSG("Successfully read " + std::to_string(count) + " thresholds ("
+                    + std::to_string(width) + "-byte wide format)");
+        fclose(fd);
+        return;
+    }
+
+    // Legacy headerless 5-byte format (backward compatible). For n >= 2^40 the true
+    // values overflow 5 bytes and a heuristic reconstructs them; that heuristic is
+    // unreliable for non-monotonic positions -- rebuild with the wide format instead.
+    if (fseek(fd, 0, SEEK_SET) != 0)
+        throw std::runtime_error(ERROR_MSG("[read_thresholds] fseek() file " + tmp_filename + " failed"));
+    if (file_size % THRBYTES != 0) {
         throw std::runtime_error(ERROR_MSG("[read_thresholds] invilid file " + tmp_filename));
     }
 
-    uint64_t length_thr = filestat.st_size / THRBYTES;
+    uint64_t length_thr = file_size / THRBYTES;
     uint64_t threshold = 0;
 
     thresholds.resize(length_thr);
@@ -194,7 +236,11 @@ void read_thresholds(std::string tmp_filename, std::vector<uint64_t>& thresholds
         thresholds[i] = threshold + step_count * MAX_5_BYTES;
     }
 
+    if (step_count > 0)
+        INFO_MSG("Legacy 5-byte thresholds required overflow reconstruction (n >= 2^40); unreliable for non-monotonic positions -- rebuild with the wide threshold format if the build fails.");
+
     SUCCESS_MSG("Successfully read " + std::to_string(length_thr) + " thresholds");
+    fclose(fd);
 }
 
 template <typename T>
