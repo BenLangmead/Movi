@@ -24,6 +24,7 @@ set(MOVI_SOURCES
     query_kmer_bv.cpp
     query_pml.cpp
     query_zml.cpp
+    coroutine_processor.cpp
     move_row.cpp
     move_row_colored.cpp
     read_processor.cpp
