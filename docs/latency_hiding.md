@@ -21,12 +21,13 @@ entries) are worth hiding; sequential run scans are left to the hardware prefetc
 
 | Style | Files |
 |-------|-------|
-| (a) sequential | `move_structure_query.cpp` (`query_pml`, `query_zml`), `query_kmer.cpp` (`query_all_kmers`, `query_kmers_from`, `query_kmers_count_bv`), `query_mem.cpp` (`query_mems`, `query_mem_bml`); shared search primitives in `move_structure_search.cpp` (`backward_search`, `extend_bidirectional`, `*_search_step`) and `move_structure.cpp` (`LF_move`, `fast_forward`) |
+| (a) sequential | `query_pml.cpp` (`query_pml`), `query_zml.cpp` (`query_zml`), `query_kmer.cpp` (`query_all_kmers`, `query_kmers_from`), `query_kmer_bv.cpp` (`query_kmers_count_bv`, `query_kmers_id_bv`), `query_mem.cpp` (`query_mems`, `query_mem_bml`); shared repositioning primitives in `move_structure_query.cpp` (`reposition_thresholds`, `reposition_randomly`, `handle_reposition_*`, `reposition_up/down`), search primitives in `move_structure_search.cpp` (`backward_search`, `extend_bidirectional`, `*_search_step`), and `move_structure.cpp` (`LF_move`, `fast_forward`) |
 | (b) manual strands | `read_processor.cpp` (`process_latency_hiding`, `kmer_search_latency_hiding`); `struct Strand` in `read_processor.hpp` |
 | (c) coroutines | `movi_co.cpp` (the `query_*_coroutine` bodies + the scheduler), built as the standalone `movi-co` binary |
 
 The k-mer-bitvector add-ons (SSHash-style MPHF IDs and the run-local exact count)
-live in `query_kmer_bv.cpp` (`build_kmerbv`, `load_kmerbv`) and the
+all live in `query_kmer_bv.cpp`: the build/load (`build_kmerbv`, `load_kmerbv`),
+the bv queries (`query_kmers_count_bv`, `query_kmers_id_bv`), and the
 `kmer_count_from_bv` helper.
 
 ## Coverage grid

@@ -22,6 +22,8 @@ set(MOVI_SOURCES
     move_structure_query.cpp
     move_structure_color.cpp
     query_kmer_bv.cpp
+    query_pml.cpp
+    query_zml.cpp
     move_row.cpp
     move_row_colored.cpp
     read_processor.cpp
