@@ -53,6 +53,7 @@
 #include "move_structure.hpp"
 #include "move_query.hpp"
 #include "movi_options.hpp"
+#include "coroutine_processor.hpp"
 #include <coroutine>
 
 using std::suspend_always;
@@ -88,6 +89,7 @@ static FILE* stderr_buf = nullptr;
 
 // Initialize buffered I/O
 static void init_buffered_io() {
+    if (stdout_buf != nullptr) return;  // idempotent: safe from both main() and run_coroutine_query()
     stdout_buf = stdout;
     stderr_buf = stderr;
     // Use full buffering for stdout (better performance)
@@ -1058,7 +1060,20 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
 }
 
 
-void process_fastq(const string& fastq_file, const string& index_dir, int concurrency) {
+void run_coroutine_query(const string& fastq_file, const string& index_dir, int concurrency,
+                         const CoroutineQueryOptions& opts) {
+    init_buffered_io();
+    debug_enabled     = opts.debug;
+    g_bpf_output      = opts.bpf_output;
+    g_ordered_output  = opts.ordered_output;
+    g_mem_query       = opts.mem_query;
+    g_kmer_query      = opts.kmer_query;
+    g_kmer_count      = opts.kmer_count;
+    g_kmer_bv         = opts.kmer_bv;
+    g_ftab_k          = opts.ftab_k;
+    g_min_mem_length  = opts.min_mem_length;
+    g_k               = opts.k;
+
     MoviOptions movi_options;
     movi_options.set_index_dir(index_dir);
     if (g_mem_query) {
@@ -1214,32 +1229,33 @@ int main(int argc, char* argv[]) {
     init_buffered_io();
     
     int arg_idx = 1;
+    CoroutineQueryOptions opts;
 
     // Parse leading flags (--debug, --bpf) in any order.
     // Accept both long (--foo) and short (-k) option flags; a positional (fastq
     // path or concurrency) never starts with '-'.
     while (arg_idx < argc && argv[arg_idx][0] == '-' && string(argv[arg_idx]) != "-") {
         string flag = argv[arg_idx];
-        if (flag == "--debug") { debug_enabled = true; }
-        else if (flag == "--bpf") { g_bpf_output = true; }
-        else if (flag == "--reorder") { g_ordered_output = true; }
-        else if (flag == "--mem") { g_mem_query = true; }
-        else if (flag == "--kmer") { g_kmer_query = true; }
-        else if (flag == "--kmer-count") { g_kmer_query = true; g_kmer_count = true; }
-        else if (flag == "--kmer-bv") { g_kmer_bv = true; }
-        else if (flag == "-k" || flag == "--k-length") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_k = std::stoi(argv[++arg_idx]); }
-        else if (flag == "--ftab-k") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_ftab_k = std::stoi(argv[++arg_idx]); }
-        else if (flag == "--min-mem-length") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } g_min_mem_length = std::stoi(argv[++arg_idx]); }
+        if (flag == "--debug") { opts.debug = true; }
+        else if (flag == "--bpf") { opts.bpf_output = true; }
+        else if (flag == "--reorder") { opts.ordered_output = true; }
+        else if (flag == "--mem") { opts.mem_query = true; }
+        else if (flag == "--kmer") { opts.kmer_query = true; }
+        else if (flag == "--kmer-count") { opts.kmer_query = true; opts.kmer_count = true; }
+        else if (flag == "--kmer-bv") { opts.kmer_bv = true; }
+        else if (flag == "-k" || flag == "--k-length") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } opts.k = std::stoi(argv[++arg_idx]); }
+        else if (flag == "--ftab-k") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } opts.ftab_k = std::stoi(argv[++arg_idx]); }
+        else if (flag == "--min-mem-length") { if (arg_idx + 1 >= argc) { print_usage(argv[0]); return 1; } opts.min_mem_length = std::stoi(argv[++arg_idx]); }
         else { fprintf(stderr_buf, "Unknown flag: %s\n", flag.c_str()); print_usage(argv[0]); return 1; }
         arg_idx++;
     }
 
     // Validate query-mode flag combinations.
-    if (g_mem_query && g_kmer_query) {
+    if (opts.mem_query && opts.kmer_query) {
         fprintf(stderr_buf, "Error: --mem and --kmer/--kmer-count are mutually exclusive\n");
         return 1;
     }
-    if (g_kmer_query && g_k < 1) {
+    if (opts.kmer_query && opts.k < 1) {
         fprintf(stderr_buf, "Error: --kmer/--kmer-count requires -k/--k-length N (N >= 1)\n");
         return 1;
     }
@@ -1268,7 +1284,7 @@ int main(int argc, char* argv[]) {
     }
     
     try {
-        process_fastq(fastq_file, index_dir, concurrency);
+        run_coroutine_query(fastq_file, index_dir, concurrency, opts);
     } catch (const exception& e) {
         fprintf(stderr_buf, "Error: %s\n", e.what());
         return 1;
