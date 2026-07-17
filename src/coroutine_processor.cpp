@@ -1105,6 +1105,25 @@ void run_coroutine_query(const string& fastq_file, const string& index_dir, int 
     if (g_kmer_query && g_kmer_bv) mv.load_kmerbv(static_cast<uint32_t>(g_k));
     fprintf(stderr_buf, "Successfully loaded Movi index from: %s\n", index_dir.c_str());
 
+    // Hand the loaded index to the core scheduler (also called directly by the
+    // movi-binary dispatch with its already-deserialized MoveStructure).
+    run_coroutine_query(mv, fastq_file, concurrency, opts);
+}
+
+void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concurrency,
+                         const CoroutineQueryOptions& opts) {
+    init_buffered_io();
+    debug_enabled     = opts.debug;
+    g_bpf_output      = opts.bpf_output;
+    g_ordered_output  = opts.ordered_output;
+    g_mem_query       = opts.mem_query;
+    g_kmer_query      = opts.kmer_query;
+    g_kmer_count      = opts.kmer_count;
+    g_kmer_bv         = opts.kmer_bv;
+    g_ftab_k          = opts.ftab_k;
+    g_min_mem_length  = opts.min_mem_length;
+    g_k               = opts.k;
+
     // PML/text/BPF header only applies to the PML output; MEM and k-mer emit
     // their own tab-delimited lines with no header.
     if (!g_mem_query && !g_kmer_query) {
