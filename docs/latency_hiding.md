@@ -23,7 +23,7 @@ entries) are worth hiding; sequential run scans are left to the hardware prefetc
 |-------|-------|
 | (a) sequential | `query_pml.cpp` (`query_pml`), `query_zml.cpp` (`query_zml`), `query_kmer.cpp` (`query_all_kmers`, `query_kmers_from`), `query_kmer_bv.cpp` (`query_kmers_count_bv`, `query_kmers_id_bv`), `query_mem.cpp` (`query_mems`, `query_mem_bml`); shared repositioning primitives in `move_structure_query.cpp` (`reposition_thresholds`, `reposition_randomly`, `handle_reposition_*`, `reposition_up/down`), search primitives in `move_structure_search.cpp` (`backward_search`, `extend_bidirectional`, `*_search_step`), and `move_structure.cpp` (`LF_move`, `fast_forward`) |
 | (b) manual strands | `read_processor.cpp` (`process_latency_hiding`, `kmer_search_latency_hiding`); `struct Strand` in `read_processor.hpp` |
-| (c) coroutines | `coroutine_processor.cpp` (the `query_*_coroutine` bodies + scheduler + `run_coroutine_query`; guarded to `MODE==6 && COLOR_MODE==0`). Reached two ways: **`movi query --coroutine`** (dispatch in `movi.cpp` `query()`, for the queries whose output is byte-identical to sequential — MEM, plain k-mer presence, count-bv) and the standalone `movi-co` binary (thin CLI wrapper in `movi_co.cpp`, all coroutine queries incl. PML) |
+| (c) coroutines | `coroutine_processor.cpp` (the `query_*_coroutine` bodies + scheduler + `run_coroutine_query`; guarded to `MODE==6 && COLOR_MODE==0`). Reached via **`movi query --coroutine`** (dispatch in `movi.cpp` `query()`), which routes PML, MEM, plain k-mer presence, and count-bv through the coroutine — all byte-identical to the sequential path. |
 
 The k-mer-bitvector add-ons (SSHash-style MPHF IDs and the run-local exact count)
 all live in `query_kmer_bv.cpp`: the build/load (`build_kmerbv`, `load_kmerbv`),
@@ -32,7 +32,7 @@ the bv queries (`query_kmers_count_bv`, `query_kmers_id_bv`), and the
 
 ## Coverage grid
 
-"before June" = predates this work. "N/A" = not implemented in that style.
+"N/A" = not implemented in that style.
 
 | Query | (a) sequential | (b) strands | (c) coroutines |
 |-------|----------------|-------------|----------------|
@@ -54,11 +54,9 @@ The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id 
   (the per-run scans dominate, so there is little latency to hide).
 - The coroutine PML body is an inline reimplementation of the PML loop; the MEM and
   k-mer coroutines instead reuse the shared search primitives.
-- **Fold status (Movi 2.5):** the coroutine engine links into the main `movi` binary;
-  `movi query --coroutine` runs MEM, plain k-mer presence, and count-bv through it
-  (verified byte-identical to the sequential path). Three cases are NOT yet routed via
-  `movi query --coroutine` and fall back to the sequential/strand path (the standalone
-  `movi-co` still runs them all): plain **k-mer count** (`--kmer-count` without `--bv`
-  — the coroutine over-counts the `found` tally vs sequential), the **MPHF-id query**
-  (`--kmer --kmer-bv` — no coroutine implementation), and **PML** (coroutine output
-  format and read orientation not yet reconciled with the mainline binary format).
+- The manual-strand path (b) is deliberately **one shared scheduler**, not per-query
+  files: `process_latency_hiding` is a single round-robin over `struct Strand` state
+  machines that serves PML, ZML and whole-read exact-count together via per-query
+  branches. The scheduler itself is query-agnostic, so splitting it per query would
+  duplicate it; the coverage grid above maps which queries it serves. (k-mer and MEM
+  are not served by the strand scheduler — see the grid.)

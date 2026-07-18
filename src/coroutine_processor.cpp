@@ -1019,51 +1019,9 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
 }
 
 
-void run_coroutine_query(const string& fastq_file, const string& index_dir, int concurrency,
-                         const CoroutineQueryOptions& opts) {
-    init_buffered_io();
-    debug_enabled     = opts.debug;
-    g_bpf_output      = opts.bpf_output;
-    g_ordered_output  = opts.ordered_output;
-    g_mem_query       = opts.mem_query;
-    g_kmer_query      = opts.kmer_query;
-    g_kmer_count      = opts.kmer_count;
-    g_kmer_bv         = opts.kmer_bv;
-    g_ftab_k          = opts.ftab_k;
-    g_min_mem_length  = opts.min_mem_length;
-    g_k               = opts.k;
-
-    MoviOptions movi_options;
-    movi_options.set_index_dir(index_dir);
-    if (g_mem_query) {
-        movi_options.set_mem();
-        movi_options.set_ftab_k(static_cast<uint32_t>(g_ftab_k));
-        movi_options.set_min_mem_length(static_cast<uint32_t>(g_min_mem_length));
-        movi_options.set_multi_ftab(false);
-    } else if (g_kmer_query) {
-        movi_options.set_kmer();
-        movi_options.set_kmer_count(g_kmer_count);
-        movi_options.set_kmer_bv(g_kmer_bv);
-        movi_options.set_k(static_cast<uint32_t>(g_k));
-        movi_options.set_ftab_k(static_cast<uint32_t>(g_ftab_k));
-        movi_options.set_multi_ftab(false);
-    } else {
-        movi_options.set_pml(); // Enable PML mode
-    }
-
-    MoveStructure mv(&movi_options);
-    mv.deserialize();
-    if ((g_mem_query && g_ftab_k > 0) || (g_kmer_query && g_ftab_k > 1)) mv.read_ftab();
-    // Run-local k-mer count structure (and the MPHF id bitvector): only needed for
-    // the --kmer-bv path; loaded once after the move structure.
-    if (g_kmer_query && g_kmer_bv) mv.load_kmerbv(static_cast<uint32_t>(g_k));
-    fprintf(stderr_buf, "Successfully loaded Movi index from: %s\n", index_dir.c_str());
-
-    // Hand the loaded index to the core scheduler (also called directly by the
-    // movi-binary dispatch with its already-deserialized MoveStructure).
-    run_coroutine_query(mv, fastq_file, concurrency, opts, std::cout);
-}
-
+// The standalone-loader run_coroutine_query(fastq, index_dir, ...) overload was
+// removed together with the movi-co binary; movi.cpp's query() dispatch calls the
+// MoveStructure& core overload below directly, on its already-deserialized index.
 void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concurrency,
                          const CoroutineQueryOptions& opts, std::ostream& out) {
     init_buffered_io();

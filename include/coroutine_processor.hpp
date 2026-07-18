@@ -25,16 +25,10 @@ struct CoroutineQueryOptions {
     int k = 0;                    // k-mer length (required for kmer_query)
 };
 
-// Loader entry point: deserialize the index in index_dir (reading ftab / kmerbv
-// as the options require), then run the coroutine query over fastq_file with
-// `concurrency` in-flight coroutines. Used by the standalone movi-co binary.
-// Default query mode (no mem_query/kmer_query set) is PML.
-void run_coroutine_query(const std::string& fastq_file, const std::string& index_dir,
-                         int concurrency, const CoroutineQueryOptions& opts);
-
-// Core entry point: drive the coroutine scheduler over an ALREADY-loaded
-// MoveStructure (index deserialized, ftab/kmerbv set up by the caller). This is
-// what the main movi binary calls from its query dispatch, so the index is never
-// loaded twice.
+// Entry point: drive the coroutine scheduler over an already-loaded MoveStructure
+// (index deserialized, ftab/kmerbv set up by the caller). The main movi binary
+// calls this from its `movi query --coroutine` dispatch. Default query mode (no
+// mem_query/kmer_query set) is PML. `out` is the output destination (a file stream
+// from output_files, or std::cout).
 void run_coroutine_query(MoveStructure& mv, const std::string& fastq_file,
                          int concurrency, const CoroutineQueryOptions& opts, std::ostream& out);

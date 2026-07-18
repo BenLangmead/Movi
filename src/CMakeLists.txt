@@ -107,9 +107,6 @@ add_executable(movi-sampled-thresholds ${MOVI_MAIN_SOURCES})
 target_link_libraries(movi-sampled-thresholds sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
 target_compile_options(movi-sampled-thresholds PUBLIC -DMODE=7 -DCOLOR_MODE=0)
 
-add_executable(movi-co movi_co.cpp ${MOVI_SOURCES})
-target_link_libraries(movi-co sdsl zlibstatic OpenMP::OpenMP_CXX hclust)
-target_compile_options(movi-co PUBLIC -DMODE=6 -DCOLOR_MODE=0)
-if(CMAKE_BUILD_TYPE STREQUAL "Profile")
-    target_compile_definitions(movi-co PRIVATE ENABLE_GPROF)
-endif()
+# The coroutine latency-hiding engine lives in coroutine_processor.cpp (in
+# MOVI_SOURCES) and is reached from the movi binary via `movi query --coroutine`.
+# See docs/latency_hiding.md.
