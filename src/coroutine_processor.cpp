@@ -45,6 +45,7 @@
 #include <mutex>
 #include <cstring>
 #include <map>
+#include <sstream>
 
 #include <sdsl/int_vector.hpp>
 #include <zlib.h>
@@ -832,19 +833,12 @@ MoveStructure::coroutine_task MoveStructure::query_mem_coroutine(
             pos_on_r = (init_pos - static_cast<int32_t>(i)) + 1;
         }
 
-        // Emit this read's MEMs (id \t start \t end \t count), one per line.
-        out_line.clear();
-        for (auto& m : mq.get_mems()) {
-            out_line.append(mq.get_query_id());
-            out_line.push_back('\t');
-            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.start));
-            out_line.push_back('\t');
-            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.end));
-            out_line.push_back('\t');
-            out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), m.count));
-            out_line.push_back('\n');
-        }
-        g_emitter.emit(read_data.seq, out_line);
+        // Format via the shared mainline output_mems so coroutine output is
+        // identical to the sequential/strand path by construction; the reorder
+        // buffer still emits in input order.
+        std::ostringstream oss;
+        output_mems(false, oss, mq);
+        g_emitter.emit(read_data.seq, oss.str());
     }
     co_return;
 }
@@ -1049,17 +1043,12 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
             }
         }
 
-        // Build the output line exactly like output_kmers(): id \t found/all \t poslist
-        out_line.clear();
-        out_line.append(mq.get_query_id());
-        out_line.push_back('\t');
-        out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), mq.found_kmer_count));
-        out_line.push_back('/');
-        out_line.append(numbuf, write_uint_to_buffer(numbuf, sizeof(numbuf), all_kmer_count));
-        out_line.push_back('\t');
-        out_line.append(mq.get_matching_lengths_string());
-        out_line.push_back('\n');
-        g_emitter.emit(read_data.seq, out_line);
+        // Format via the shared mainline output_kmers so coroutine output is
+        // identical to the sequential/strand path by construction; the reorder
+        // buffer still emits in input order.
+        std::ostringstream oss;
+        output_kmers(false, oss, all_kmer_count, mq, *movi_options);
+        g_emitter.emit(read_data.seq, oss.str());
     }
     co_return;
 }
