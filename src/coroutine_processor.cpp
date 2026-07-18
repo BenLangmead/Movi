@@ -46,6 +46,7 @@
 #include <cstring>
 #include <map>
 #include <sstream>
+#include <iostream>
 
 #include <sdsl/int_vector.hpp>
 #include <zlib.h>
@@ -180,21 +181,13 @@ struct OrderedEmitter {
     uint64_t next_emit = 0;
     bool ordered = false;         // when true, buffer + write in input order; else completion order
     std::map<uint64_t, std::string> pending;  // completed lines awaiting their turn
-    char buf[OUTPUT_BUFFER_SIZE];
-    size_t pos = 0;
+    // Output destination. Defaults to stdout (used by the standalone movi-co
+    // binary); the main movi binary sets it to the appropriate output_files
+    // stream so coroutine output lands in the same place as the sequential path.
+    std::ostream* out = &std::cout;
 
-    void flush_chunk() {
-        if (pos > 0) { fwrite(buf, 1, pos, stdout_buf); pos = 0; }
-    }
     void write_line(const std::string& line) {
-        if (line.size() > OUTPUT_BUFFER_SIZE) {
-            flush_chunk();
-            fwrite(line.data(), 1, line.size(), stdout_buf);
-        } else {
-            if (pos + line.size() > OUTPUT_BUFFER_SIZE) flush_chunk();
-            std::memcpy(buf + pos, line.data(), line.size());
-            pos += line.size();
-        }
+        out->write(line.data(), line.size());
     }
     // Emit the line for read 'seq'. Writes immediately if it is the next read in
     // input order, then drains any consecutive buffered lines; otherwise buffers
@@ -218,8 +211,7 @@ struct OrderedEmitter {
     void finish() {
         for (auto& kv : pending) write_line(kv.second);
         pending.clear();
-        flush_chunk();
-        fflush(stdout_buf);
+        out->flush();
     }
 };
 static OrderedEmitter g_emitter;
@@ -1096,12 +1088,13 @@ void run_coroutine_query(const string& fastq_file, const string& index_dir, int 
 
     // Hand the loaded index to the core scheduler (also called directly by the
     // movi-binary dispatch with its already-deserialized MoveStructure).
-    run_coroutine_query(mv, fastq_file, concurrency, opts);
+    run_coroutine_query(mv, fastq_file, concurrency, opts, std::cout);
 }
 
 void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concurrency,
-                         const CoroutineQueryOptions& opts) {
+                         const CoroutineQueryOptions& opts, std::ostream& out) {
     init_buffered_io();
+    g_emitter.out = &out;
     debug_enabled     = opts.debug;
     g_bpf_output      = opts.bpf_output;
     g_ordered_output  = opts.ordered_output;
@@ -1119,9 +1112,9 @@ void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concur
         if (g_bpf_output) {
             BPFHeader header;
             header.init(16);  // matching lengths are stored as 16-bit values
-            fwrite(&header, sizeof(header), 1, stdout_buf);
+            g_emitter.out->write(reinterpret_cast<const char*>(&header), sizeof(header));
         } else {
-            fprintf(stdout_buf, "# Read_ID PML_Values\n");
+            *g_emitter.out << "# Read_ID PML_Values\n";
         }
     }
     g_emitter.ordered = g_ordered_output;

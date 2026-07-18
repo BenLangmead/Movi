@@ -8,6 +8,7 @@
 // carried in CoroutineQueryOptions rather than file-scope globals.
 
 #include <string>
+#include <iosfwd>
 
 class MoveStructure;  // forward declaration; the core entry point takes it by reference
 
@@ -36,4 +37,4 @@ void run_coroutine_query(const std::string& fastq_file, const std::string& index
 // what the main movi binary calls from its query dispatch, so the index is never
 // loaded twice.
 void run_coroutine_query(MoveStructure& mv, const std::string& fastq_file,
-                         int concurrency, const CoroutineQueryOptions& opts);
+                         int concurrency, const CoroutineQueryOptions& opts, std::ostream& out);
