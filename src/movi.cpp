@@ -285,21 +285,15 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
 
 #if MODE == 6 && COLOR_MODE == 0
     // Coroutine latency-hiding dispatch (regular-thresholds, non-color only). Route
-    // only the queries whose coroutine output is byte-identical to the sequential
-    // path: MEM, plain k-mer presence, and bitvector count (--kmer-count --kmer-bv).
+    // the queries whose coroutine output is byte-identical to the sequential path:
+    // PML, MEM, plain k-mer presence, and bitvector count (--kmer-count --kmer-bv).
     // The (is_kmer_count() == is_kmer_bv()) test selects exactly presence (F,F) and
-    // count-bv (T,T). Plain k-mer count (--kmer-count, no bv) and the MPHF-id query
-    // (--kmer --kmer-bv) are NOT routed here: the coroutine's plain-count found tally
-    // diverges from the sequential path and the MPHF-id query has no coroutine
-    // implementation, so those fall through to the sequential/strand path unchanged.
-    // (Fixing both in the coroutine is a separate correctness task.)
-    // PML/ZML/exact-count are likewise not routed here: ZML and exact-count have no
-    // coroutine variant, and while query_pml_coroutine exists, its output format and
-    // read orientation are not yet reconciled with the mainline binary PML format --
-    // so `movi query --pml --coroutine` uses the strand path, and coroutine PML stays
-    // reachable only via the standalone movi-co binary until that reconciliation lands.
+    // count-bv (T,T). Not routed (they fall through to the sequential/strand path):
+    // plain k-mer count (--kmer-count, no bv), whose coroutine found-tally diverges;
+    // the MPHF-id query (--kmer --kmer-bv), which has no coroutine implementation; and
+    // ZML / exact-count, which have no coroutine variant.
     if (movi_options.is_coroutine() &&
-        (movi_options.is_mem() ||
+        (movi_options.is_pml() || movi_options.is_mem() ||
          (movi_options.is_kmer() && (movi_options.is_kmer_count() == movi_options.is_kmer_bv())))) {
         CoroutineQueryOptions copts;
         copts.mem_query      = movi_options.is_mem();
@@ -310,8 +304,9 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
         copts.min_mem_length = static_cast<int>(movi_options.get_min_mem_length());
         copts.k              = static_cast<int>(movi_options.get_k());
         copts.ordered_output = true;  // emit in input order, matching the sequential path
-        std::ostream& dest = movi_options.is_mem() ? output_files.mems_file
-                                                   : output_files.kmer_file;
+        std::ostream& dest = movi_options.is_mem()  ? output_files.mems_file
+                           : movi_options.is_kmer() ? output_files.kmer_file
+                                                    : output_files.mls_file;
         run_coroutine_query(mv_, movi_options.get_read_file(),
                             static_cast<int>(movi_options.get_strands()), copts,
                             movi_options.write_stdout_enabled() ? std::cout : dest);

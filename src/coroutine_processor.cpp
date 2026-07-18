@@ -393,11 +393,9 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
     const bool use_separator = this->use_separator();
     const int sep_adjust = use_separator ? 1 : 0;
     
-    // Per-coroutine work buffers reused across reads (cleared, not reallocated,
+    // Per-coroutine work buffer reused across reads (cleared, not reallocated,
     // each read) so there is no per-read heap churn.
     std::vector<uint16_t> matching_lens;
-    std::string out_line;
-    char numbuf[24];
 
     while (true) {
         DEBUG_MSG_CO("DEBUG: Coroutine %d about to await next read\n", coroutine_id);
@@ -411,11 +409,11 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
         int read_bases = read_data.sequence.length();
         total_bases += read_bases;
         
-        // Process the read in place: reverse this coroutine's own copy of the
-        // sequence and use it directly as the query (no extra copies, no
-        // per-read MoveQuery allocation).
+        // Process the read in place, WITHOUT reversing it: sequential query_pml
+        // walks the read right-to-left (pos from length-1 down to 0) directly, so
+        // the coroutine does the same and produces the SAME forward-read PMLs --
+        // not the reversed-read PMLs the old movi-co convention emitted.
         std::string& R = read_data.sequence;
-        std::reverse(R.begin(), R.end());
         matching_lens.clear();
         int32_t roff = R.length() - 1;    // offset in read
         uint64_t idx = r - 1;             // row index
@@ -425,21 +423,16 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
         assert(idx < rlbwt.size());
         assert(offset < get_n(idx));
 
-        // NOTE: the PML inner loop below is intentionally an INLINE reimplementation
-        // of the repositioning and the LF/fast-forward step, rather than calls to the
-        // shared reposition_thresholds / get_id / LF_move primitives (the way the MEM
-        // and k-mer coroutines reuse them). A reuse version was written and measured
-        // byte-identical but materially slower, and that was confirmed on a dedicated
-        // c5.metal box (7 reps, tight): at W=8 the hand-inlined loop is ~109 ns/base
-        // vs ~130 for the primitive-reusing version (~19%). PML's per-step work is so
-        // small that once latency hiding is engaged, the un-inlined/un-fused primitive
-        // calls dominate. LTO (which inlined LF_move) and even __attribute__((flatten))
-        // on this function (which force-inlines the whole reposition chain) recovered
-        // only ~5 ns of the ~21 ns gap (~126 ns/base) -- the rest is structural, not
-        // just un-inlined calls. So the inline form is kept deliberately; it was
-        // corrected to match the engine exactly (the four bugs noted in the foundation
-        // commit). If you edit it, re-validate byte-for-byte against production
-        // query_pml (--pml --reverse).
+        // The PML inner loop below inlines the repositioning and the LF/fast-forward
+        // step, rather than calling the shared reposition_thresholds / get_id / LF_move
+        // primitives (as the MEM and k-mer coroutines do). This is a deliberate
+        // performance choice: PML's per-step work is so small that, once latency hiding
+        // is engaged, the un-inlined primitive calls dominate. On a c5.metal box (7 reps,
+        // W=8) the inlined loop runs ~109 ns/base vs ~130 for the primitive-reusing
+        // version (~19%); LTO and __attribute__((flatten)) recover only ~5 ns of that
+        // gap, so the difference is structural, not just un-inlined calls. If you edit
+        // this loop, re-validate byte-for-byte against `movi query --pml` (the
+        // tests/regression_coroutine_separators.sh check does exactly this).
         while (roff > -1) {
             DEBUG_MSG_CO("DEBUG: Coroutine %d processing, roff=%d\n", coroutine_id, roff);
             char row_c_id = static_cast<char>((rlbwt[idx].n & (~mask_c)) >> SHIFT_C);
@@ -567,36 +560,20 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
             idx = new_idx;
         }
         
-        // Output results for this read into the reused line buffer (cleared
-        // each read so capacity is retained). Building the whole line first
-        // means arbitrarily long reads can never overflow/truncate the shared
-        // buffer.
-        out_line.clear();
-        if (g_bpf_output) {
-            // Binary BPF record, byte-compatible with mainline Movi's
-            // output_base_stats: uint16 name length, name bytes, uint64 count,
-            // then the raw uint16 matching-length array.
-            uint16_t name_len = static_cast<uint16_t>(read_data.name.size());
-            out_line.append(reinterpret_cast<const char*>(&name_len), sizeof(name_len));
-            out_line.append(read_data.name);
-            uint64_t cnt = matching_lens.size();
-            out_line.append(reinterpret_cast<const char*>(&cnt), sizeof(cnt));
-            if (cnt) out_line.append(reinterpret_cast<const char*>(matching_lens.data()), cnt * sizeof(uint16_t));
-        } else {
-            out_line.append(read_data.name);
-            out_line.push_back(' ');
-            for (size_t i = 0; i < matching_lens.size(); i++) {
-                size_t w = write_uint_to_buffer(numbuf, sizeof(numbuf), matching_lens[i]);
-                out_line.append(numbuf, w);
-                if (i + 1 < matching_lens.size()) out_line.push_back(' ');
-            }
-            out_line.push_back('\n');
-        }
-
-        // Hand the completed record to the in-order emitter: it writes now if
-        // this is the next read in input order, otherwise buffers a copy until
-        // the earlier reads finish. (out_line is reused across reads.)
-        g_emitter.emit(read_data.seq, out_line);
+        // Emit via the shared mainline output_base_stats so coroutine PML is
+        // byte-identical to the sequential query_pml path (values, order, and format):
+        // both walk the read right-to-left, so matching_lens is already in the order
+        // query_pml records via add_ml. output_base_stats then formats it identically
+        // (binary st_length+name+lengths to a file, or the reversed-string text form
+        // to stdout).
+        MoveQuery mq_out{std::string()};
+        mq_out.set_query_id(read_data.name);
+        const bool to_stdout = movi_options->is_stdout();
+        for (uint16_t v : matching_lens)
+            mq_out.add_ml(static_cast<uint64_t>(v), to_stdout);
+        std::ostringstream oss;
+        output_base_stats(DataType::match_length, to_stdout, oss, mq_out);
+        g_emitter.emit(read_data.seq, oss.str());
         DEBUG_MSG_CO("DEBUG: Coroutine %d finished processing read %d, looping back\n", coroutine_id, read_count);
     }
     
@@ -835,14 +812,14 @@ MoveStructure::coroutine_task MoveStructure::query_mem_coroutine(
 
 
 // Coroutine k-mer query with latency hiding. Mirrors MoveStructure::query_all_kmers
-// (together with query_kmers_from and look_ahead_backward_search) exactly -- both
-// skip heuristics included -- so output is byte-identical to production
-// `movi query --kmer [--kmer-count]`. The only change versus production is a
-// prefetch + co_yield issued before each backward_search_step (the cache-missing
-// LF_move). Those two inner backward-search loops are inlined here because suspend
-// points cannot live in called functions. One coroutine serves both modes via
-// count_mode. k-mer search uses plain (not bidirectional) backward search, so no
-// reverse-complement index is needed and the read is NOT reversed.
+// (together with query_kmers_from and look_ahead_backward_search), including both
+// skip heuristics, so its output is byte-identical to `movi query --kmer
+// [--kmer-count]`. It adds a prefetch + co_yield before each backward_search_step
+// (the cache-missing LF_move) to hide memory latency. Those two inner backward-search
+// loops are inlined here because suspend points cannot live in called functions. One
+// coroutine serves both modes via count_mode. k-mer search uses plain (not
+// bidirectional) backward search, so no reverse-complement index is needed and the
+// read is not reversed.
 MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
     SharedFastqReader& reader,
     coroutine_handle<>& my_handle_storage,
@@ -1102,17 +1079,10 @@ void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concur
     g_min_mem_length  = opts.min_mem_length;
     g_k               = opts.k;
 
-    // PML/text/BPF header only applies to the PML output; MEM and k-mer emit
-    // their own tab-delimited lines with no header.
-    if (!g_mem_query && !g_kmer_query) {
-        if (g_bpf_output) {
-            BPFHeader header;
-            header.init(16);  // matching lengths are stored as 16-bit values
-            g_emitter.out->write(reinterpret_cast<const char*>(&header), sizeof(header));
-        } else {
-            *g_emitter.out << "# Read_ID PML_Values\n";
-        }
-    }
+    // No per-run PML header is written here: PML output goes through the shared
+    // output_base_stats (per-read). When writing to a file, the one-time BPFHeader is
+    // written by open_output_files; stdout PML has no header. This matches the
+    // sequential path, so coroutine PML output is byte-identical to it.
     g_emitter.ordered = g_ordered_output;
     
     auto start_time = steady_clock::now();
