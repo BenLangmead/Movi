@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <cstdio>
 #include <chrono>
+#include <iostream>
 #include <cstddef>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -16,6 +17,7 @@
 #include "read_processor.hpp"
 #include "movi_options.hpp"
 #include "movi_parser.hpp"
+#include "coroutine_processor.hpp"
 #include "classifier.hpp"
 #include "batch_loader.hpp"
 
@@ -280,6 +282,38 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
     OutputFiles output_files;
     open_output_files(movi_options, output_files);
     mv_.set_output_files(&output_files);
+
+#if MODE == 6 && COLOR_MODE == 0
+    // Coroutine latency-hiding dispatch (regular-thresholds, non-color only). Route
+    // only the queries whose coroutine output is byte-identical to the sequential
+    // path: MEM, plain k-mer presence, and bitvector count (--kmer-count --kmer-bv).
+    // The (is_kmer_count() == is_kmer_bv()) test selects exactly presence (F,F) and
+    // count-bv (T,T). Plain k-mer count (--kmer-count, no bv) and the MPHF-id query
+    // (--kmer --kmer-bv) are NOT routed here: the coroutine's plain-count found tally
+    // diverges from the sequential path and the MPHF-id query has no coroutine
+    // implementation, so those fall through to the sequential/strand path unchanged.
+    // (Fixing both in the coroutine is a separate correctness task.)
+    if (movi_options.is_coroutine() &&
+        (movi_options.is_mem() ||
+         (movi_options.is_kmer() && (movi_options.is_kmer_count() == movi_options.is_kmer_bv())))) {
+        CoroutineQueryOptions copts;
+        copts.mem_query      = movi_options.is_mem();
+        copts.kmer_query     = movi_options.is_kmer();
+        copts.kmer_count     = movi_options.is_kmer_count();
+        copts.kmer_bv        = movi_options.is_kmer_bv();
+        copts.ftab_k         = static_cast<int>(movi_options.get_ftab_k());
+        copts.min_mem_length = static_cast<int>(movi_options.get_min_mem_length());
+        copts.k              = static_cast<int>(movi_options.get_k());
+        copts.ordered_output = true;  // emit in input order, matching the sequential path
+        std::ostream& dest = movi_options.is_mem() ? output_files.mems_file
+                                                   : output_files.kmer_file;
+        run_coroutine_query(mv_, movi_options.get_read_file(),
+                            static_cast<int>(movi_options.get_strands()), copts,
+                            movi_options.write_stdout_enabled() ? std::cout : dest);
+        close_output_files(movi_options, output_files);
+        return;
+    }
+#endif
 
     uint64_t total_ff_count = 0;
 
