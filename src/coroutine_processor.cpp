@@ -619,8 +619,6 @@ MoveStructure::coroutine_task MoveStructure::query_mem_coroutine(
 
     const int32_t min_mem_length = movi_options->get_min_mem_length();
     const size_t  ftab_k = movi_options->get_ftab_k();
-    char numbuf[24];
-    std::string out_line;
 
     // Split backward_search_step at the LF destination jump — the only cold-miss
     // access in search. step_prep does update_interval (sequential, hw-prefetchable)
@@ -853,8 +851,6 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
     const size_t  ftab_k = movi_options->get_ftab_k();
     const int32_t k = static_cast<int32_t>(movi_options->get_k());
     const bool    count_mode = movi_options->is_kmer_count();
-    std::string out_line;
-    char numbuf[24];
 
     // One backward_search_step, split so the prefetch + co_yield sit at the only
     // long-range jump in MODE-6 interval search: the LF destination row. step_prep

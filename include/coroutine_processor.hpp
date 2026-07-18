@@ -2,10 +2,10 @@
 
 // Coroutine latency-hiding query engine ("style (c)" in docs/latency_hiding.md).
 // The engine (scheduler + SharedFastqReader + OrderedEmitter + the
-// query_*_coroutine bodies) lives in movi_co.cpp / coroutine_processor.cpp; this
-// header is the entry point so the main `movi` binary can drive it, not just the
-// standalone movi-co binary. Everything the engine needs to know about a query is
-// carried in CoroutineQueryOptions rather than file-scope globals.
+// query_*_coroutine bodies) lives in coroutine_processor.cpp; this header is the
+// entry point so the main `movi` binary can drive it (via `movi query --coroutine`),
+// not just the standalone movi-co binary. Everything the engine needs to know about
+// a query is carried in CoroutineQueryOptions rather than file-scope globals.
 
 #include <string>
 #include <iosfwd>

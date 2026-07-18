@@ -39,7 +39,7 @@
 
 class Classifier;
 
-// Forward declaration for SharedFastqReader (defined in movi_co.cpp)
+// Forward declaration for SharedFastqReader (defined in coroutine_processor.cpp)
 class SharedFastqReader;
 
 struct ThresholdsRow {
@@ -154,7 +154,7 @@ class MoveStructure {
         uint64_t query_pml(MoveQuery& mq);
         uint64_t query_zml(MoveQuery& mq);
 
-        // C++20 coroutine versions of the queries (latency-hiding style (c); see movi_co.cpp).
+        // C++20 coroutine versions of the queries (latency-hiding style (c); see coroutine_processor.cpp).
         // All three share one return type and the scheduler scaffolding.
         struct coroutine_task;
         coroutine_task query_pml_coroutine(
@@ -194,7 +194,6 @@ class MoveStructure {
 /***************************************************************************/
 /**********  Beginning of functions implemented in query_kmer.cpp  ***********/
         void query_all_kmers(MoveQuery& mq, bool kmer_counts = false);
-        uint64_t query_kmers_from_bidirectional(MoveQuery& mq, int32_t& pos_on_r);
         uint64_t query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single = false,
                                   MoveInterval* interval_out = nullptr);
         uint64_t query_kmers_count_bv(MoveQuery& mq, int32_t& pos_on_r);

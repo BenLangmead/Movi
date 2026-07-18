@@ -293,6 +293,11 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
     // diverges from the sequential path and the MPHF-id query has no coroutine
     // implementation, so those fall through to the sequential/strand path unchanged.
     // (Fixing both in the coroutine is a separate correctness task.)
+    // PML/ZML/exact-count are likewise not routed here: ZML and exact-count have no
+    // coroutine variant, and while query_pml_coroutine exists, its output format and
+    // read orientation are not yet reconciled with the mainline binary PML format --
+    // so `movi query --pml --coroutine` uses the strand path, and coroutine PML stays
+    // reachable only via the standalone movi-co binary until that reconciliation lands.
     if (movi_options.is_coroutine() &&
         (movi_options.is_mem() ||
          (movi_options.is_kmer() && (movi_options.is_kmer_count() == movi_options.is_kmer_bv())))) {
