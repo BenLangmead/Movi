@@ -249,7 +249,15 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
     // So when the user runs `movi query --mem` without an explicit --ftab-k, auto-select
     // the deepest ftab.<k>.bin present in the index, giving fast MEM by default without
     // the user needing to know which ftab depths were built.
+    //
+    // Constraint: for the length-thresholded (BML) MEM search the ftab must be shorter
+    // than --min-mem-length. An ftab whose k is >= min-mem-length over-extends the seed
+    // (it reaches left of the intended MEM start) and makes query_mem_bml loop, so the
+    // auto-select caps at min-mem-length-1. The all-MEM path (min-mem-length <= 1,
+    // query_all_mems) has no such cap. An explicit --ftab-k is validated below.
     if (movi_options.is_mem() && movi_options.get_ftab_k() == 0) {
+        const uint32_t mm = movi_options.get_min_mem_length();
+        const uint32_t cap = (mm > 1) ? (mm - 1) : std::numeric_limits<uint32_t>::max();
         uint32_t best = 0;
         std::error_code ec;
         for (const auto& entry : std::filesystem::directory_iterator(movi_options.get_index_dir(), ec)) {
@@ -260,13 +268,14 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                 const std::string kstr = name.substr(5, name.size() - 9);
                 if (!kstr.empty() && std::all_of(kstr.begin(), kstr.end(), ::isdigit)) {
                     uint32_t k = static_cast<uint32_t>(std::stoul(kstr));
-                    if (k > best) best = k;
+                    if (k > best && k <= cap) best = k;
                 }
             }
         }
         if (best > 1) {
             movi_options.set_ftab_k(best);
-            INFO_MSG("MEM: auto-selected the deepest available ftab (ftab-k=" + std::to_string(best) + ").");
+            INFO_MSG("MEM: auto-selected ftab-k=" + std::to_string(best) +
+                     " (deepest ftab shorter than the minimum MEM length).");
         }
     }
 
@@ -289,10 +298,16 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
         }
         if (movi_options.get_ftab_k() == 0) {
             throw std::runtime_error(ERROR_MSG("MEM finding requires an ftab, but none was found in the index. Build one with `movi ftab --ftab-k 12` (a deeper ftab means faster MEM search; ftab-12 is recommended). It is then auto-selected, or pass --ftab-k <k> explicitly."));
-        } else {
-            if (movi_options.get_min_mem_length() > movi_options.get_ftab_k()) {
-                WARNING_MSG("Setting minimum MEM (length " + std::to_string(movi_options.get_min_mem_length()) + ") greater than ftab k (" + std::to_string(movi_options.get_ftab_k()) + ") causes a slower MEM search.");
-            }
+        } else if (movi_options.get_min_mem_length() > 1 &&
+                   movi_options.get_ftab_k() >= movi_options.get_min_mem_length()) {
+            // ftab-k must be strictly shorter than min-mem-length for the BML search;
+            // an ftab that long makes query_mem_bml loop. (Auto-select already caps at
+            // min-mem-length-1; this catches an explicit, out-of-range --ftab-k.)
+            throw std::runtime_error(ERROR_MSG("For length-thresholded MEM search, --ftab-k (" +
+                std::to_string(movi_options.get_ftab_k()) + ") must be less than --min-mem-length (" +
+                std::to_string(movi_options.get_min_mem_length()) + "). An ftab at least as long as the "
+                "minimum MEM length makes the search loop; use a shorter --ftab-k (the deepest ftab below "
+                "min-mem-length is fastest)."));
         }
     }
 

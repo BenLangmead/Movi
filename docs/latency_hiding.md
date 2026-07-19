@@ -61,8 +61,11 @@ The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id 
   (the per-run scans dominate, so there is little latency to hide).
 - **MEM speed / ftab:** MEM search is accelerated by the ftab, and a deeper ftab means
   fewer and cheaper bidirectional `extend_bidirectional` steps. `movi query --mem`
-  auto-selects the deepest `ftab.<k>.bin` present in the index when `--ftab-k` is not
-  given, so build an ftab-12 (`movi ftab --ftab-k 12`) for the best MEM throughput.
+  auto-selects the deepest `ftab.<k>.bin` in the index that is **shorter than
+  `--min-mem-length`** when `--ftab-k` is not given, so build an ftab-12
+  (`movi ftab --ftab-k 12`) for the best MEM throughput. (`--ftab-k` must be strictly
+  less than the minimum MEM length: an ftab that long over-extends the BML seed and
+  makes `query_mem_bml` loop, so an explicit out-of-range `--ftab-k` is now rejected.)
   With ftab-12 the length-thresholded (BML, `--min-mem-length` above ~1) MEM query is
   within ~5.5x of k-mer at HPRC scale and faster than k-mer at E. coli scale. The one
   slow case is all-MEM enumeration (`--min-mem-length 1`, `query_all_mems`), where the
