@@ -289,16 +289,15 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
 #if MODE == 6 && COLOR_MODE == 0
     // Coroutine latency-hiding dispatch (regular-thresholds, non-color only). Route
     // the queries whose coroutine output is byte-identical to the sequential path:
-    // PML, MEM, plain k-mer presence, and bitvector count (--kmer-count --kmer-bv).
-    // The (is_kmer_count() == is_kmer_bv()) test selects exactly presence (F,F) and
-    // count-bv (T,T). Not routed (they fall through to the sequential/strand path):
-    // plain k-mer count (--kmer-count, no bv), whose coroutine found-tally diverges;
-    // the MPHF-id query (--kmer --kmer-bv), which has no coroutine implementation; and
-    // ZML / exact-count, which have no coroutine variant.
+    // PML, MEM, and every k-mer query except the MPHF-id lookup. Among k-mer queries
+    // that is presence (F,F), plain count (T,F), and bitvector count (T,T); only the
+    // MPHF-id query (--kmer --kmer-bv, i.e. bv without count) is excluded, since it has
+    // no coroutine implementation and falls through to the sequential path. ZML and
+    // exact-count also fall through, having no coroutine variant.
     if (movi_options.is_coroutine()) {
         const bool coroutine_routable =
             movi_options.is_pml() || movi_options.is_mem() ||
-            (movi_options.is_kmer() && (movi_options.is_kmer_count() == movi_options.is_kmer_bv()));
+            (movi_options.is_kmer() && !(movi_options.is_kmer_bv() && !movi_options.is_kmer_count()));
         if (coroutine_routable) {
             CoroutineQueryOptions copts;
             copts.mem_query      = movi_options.is_mem();
@@ -319,8 +318,8 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
         // byte-identically; warn so a benchmark does not silently attribute sequential
         // timings to the coroutine path.
         std::cerr << "[movi] note: --coroutine has no coroutine implementation for this query "
-                     "(plain --kmer-count without --kmer-bv, MPHF-id --kmer --kmer-bv, ZML, or "
-                     "exact count); running the sequential path instead." << std::endl;
+                     "(MPHF-id --kmer --kmer-bv, ZML, or exact count); running the sequential "
+                     "path instead." << std::endl;
     }
 #else
     if (movi_options.is_coroutine()) {

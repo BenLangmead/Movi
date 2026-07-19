@@ -41,16 +41,15 @@ bv queries (`query_kmers_count_bv`, `query_kmers_id_bv`). The small
 | ZML | `query_zml` | `process_latency_hiding` | N/A |
 | PML | `query_pml` | `process_latency_hiding` | `query_pml_coroutine` |
 | k-mer presence | `query_all_kmers`/`query_kmers_from` | `kmer_search_latency_hiding` (disabled by default) | `query_kmer_coroutine` |
-| k-mer count (no bitvectors) | `query_all_kmers` count branch → `MoveInterval::count()` | N/A | not routed¹ |
+| k-mer count (no bitvectors) | `query_all_kmers` count branch → `MoveInterval::count()` | N/A | `query_kmer_coroutine` (count mode) |
 | k-mer count (bitvector) | `query_kmers_count_bv` → `kmer_count_from_bv` (`--kmer-count --kmer-bv`) | N/A | `query_kmer_coroutine` (`--kmer-bv`) |
 | MEMs | `query_mems`/`query_mem_bml` → `extend_bidirectional` | N/A | `query_mem_coroutine` |
 
-¹ `query_kmer_coroutine` contains a plain-count branch, but `movi query --coroutine
---kmer-count` (no `--kmer-bv`) is **not** dispatched to it (`movi.cpp` routes it to the
-sequential path): the coroutine's `found` tally diverges from the sequential count. Fixing
-that divergence is a tracked coroutine-correctness task; until then only presence and
-bitvector-count are routed to the coroutine. The MPHF-id query (`--kmer --kmer-bv`) has no
-coroutine variant at all and is likewise routed to the sequential path.
+`movi query --coroutine` routes PML, MEM, and every k-mer query except the MPHF-id lookup
+(`--kmer --kmer-bv`): k-mer presence, plain count (`--kmer-count`), and bitvector count
+(`--kmer-count --kmer-bv`) all run through `query_kmer_coroutine`, byte-identical to the
+sequential path. The MPHF-id query has no coroutine variant and falls through to the
+sequential path (as do ZML and whole-read exact-count).
 
 The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id via
 `movi query --kmer --kmer-bv` (a drop-in for SSHash's lookup), built by

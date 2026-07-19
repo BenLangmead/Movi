@@ -913,9 +913,11 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
                     }
 
                     if (count_mode) {
-                        // present=1 per k-mer keeps the found/all header correct;
-                        // kc is the displayed multiplicity.
-                        mq.add_kmer(kmer_end - k + 1, /*present=*/1,
+                        // Presence is `found` (0 or 1), matching the sequential count
+                        // path (query_all_kmers): an absent k-mer passes count 0, which
+                        // add_kmer treats as a no-op (no poslist entry, no found tally),
+                        // while a present k-mer records kc as its occurrence multiplicity.
+                        mq.add_kmer(kmer_end - k + 1, found,
                                     std::numeric_limits<uint64_t>::max(), kc);
                     } else {
                         mq.add_kmer(pos_on_r + 2 - k, found);

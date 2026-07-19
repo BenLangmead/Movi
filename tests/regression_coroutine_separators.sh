@@ -1,8 +1,8 @@
 #!/bin/bash
 # Regression test: the coroutine latency-hiding path (`movi query --coroutine`)
 # must produce exactly the same results as the sequential path on a separator-using
-# index, for every query it routes: PML, k-mer presence, and MEM. PML is checked
-# per-read (exact value arrays by id); k-mer and MEM are checked as sorted-line
+# index, for every query it routes: PML, k-mer presence, k-mer count, and MEM. PML is
+# checked per-read (exact value arrays by id); the others are checked as sorted-line
 # multisets (order-independent, since the coroutine reorder buffer emits in input
 # order while the sequential path emits in batch order).
 #
@@ -125,14 +125,15 @@ compare_file_mode () {  # $1=label  $2=output-file suffix  $3...=query flags (no
   echo "PASS: coroutine $label matches sequential exactly (file content, $nco records)"
 }
 
-compare_file_mode kmer ".kmers.$K" --kmer -k "$K"
-compare_file_mode mem  ".mems"     --mem --ftab-k 10 --min-mem-length 25
+compare_file_mode kmer      ".kmers.$K" --kmer       -k "$K"
+compare_file_mode kmercount ".kmers.$K" --kmer-count -k "$K"
+compare_file_mode mem       ".mems"     --mem --ftab-k 10 --min-mem-length 25
 
 # Scope note: this test covers the coroutine queries that run on a plain
-# regular-thresholds --separators index (PML, k-mer presence, MEM). The remaining
-# routed coroutine query, bitvector count (--kmer-count --kmer-bv), needs a kmer-bv
-# index (movi build-kmerbv, with the per-k B_k/C_k structures) that this lightweight
-# test does not build; its coroutine-vs-sequential equivalence is validated by the
-# cluster byte-gate baseline.
+# regular-thresholds --separators index (PML, k-mer presence, k-mer count, MEM). The
+# remaining routed coroutine query, bitvector count (--kmer-count --kmer-bv), needs a
+# kmer-bv index (movi build-kmerbv, with the per-k B_k/C_k structures) that this
+# lightweight test does not build; its coroutine-vs-sequential equivalence is validated
+# by the cluster byte-gate baseline.
 
-echo "[regression] all coroutine-vs-sequential checks passed (PML, k-mer, MEM)"
+echo "[regression] all coroutine-vs-sequential checks passed (PML, k-mer, k-mer count, MEM)"
