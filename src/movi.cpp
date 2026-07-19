@@ -243,22 +243,29 @@ void color(MoveStructure& mv_, MoviOptions& movi_options) {
 
 void query(MoveStructure& mv_, MoviOptions& movi_options) {
 
-    // MEM search is accelerated by the ftab, and a deeper ftab means fewer (and
-    // cheaper) bidirectional extend steps. The ftab only accelerates; MEM results are
-    // ftab-independent.
-    // So when the user runs `movi query --mem` without an explicit --ftab-k, auto-select
-    // the deepest ftab.<k>.bin present in the index, giving fast MEM by default without
-    // the user needing to know which ftab depths were built.
+    // The ftab accelerates MEM and k-mer queries (it only accelerates -- results are
+    // ftab-independent), and the deepest applicable ftab is fastest. So when the user
+    // runs `movi query --mem` or `--kmer` without an explicit --ftab-k, auto-select the
+    // deepest ftab.<k>.bin in the index that fits the query, giving fast queries by
+    // default without the user needing to know which depths were built.
     //
-    // Constraint: for the length-thresholded (BML) MEM search the ftab must be no longer
-    // than --min-mem-length. ftab-k == min-mem-length is ideal (the ftab seeds the whole
-    // minimum window, zero bidirectional extend steps); ftab-k > min-mem-length would
-    // over-extend the seed left of the intended MEM start, so the auto-select caps at
-    // min-mem-length. The all-MEM path (min-mem-length <= 1, query_all_mems) has no such
-    // cap. An explicit --ftab-k is validated below.
-    if (movi_options.is_mem() && movi_options.get_ftab_k() == 0) {
-        const uint32_t mm = movi_options.get_min_mem_length();
-        const uint32_t cap = (mm > 1) ? mm : std::numeric_limits<uint32_t>::max();
+    // Cap on the ftab depth (a longer ftab over-extends the seed and is wrong/unusable):
+    //   - MEM (length-thresholded, BML): ftab-k <= --min-mem-length; ftab-k ==
+    //     min-mem-length is ideal (whole seed in one lookup). all-MEM (min-mem <= 1) is
+    //     uncapped.
+    //   - k-mer: ftab-k <= k; ftab-k == k resolves the whole k-mer in one lookup.
+    // An explicit --ftab-k is validated against the same caps below.
+    if (movi_options.get_ftab_k() == 0 && (movi_options.is_mem() || movi_options.is_kmer())) {
+        uint32_t cap = std::numeric_limits<uint32_t>::max();
+        std::string what = "query";
+        if (movi_options.is_mem()) {
+            const uint32_t mm = movi_options.get_min_mem_length();
+            if (mm > 1) cap = mm;
+            what = "MEM";
+        } else {
+            cap = static_cast<uint32_t>(movi_options.get_k());
+            what = "k-mer";
+        }
         uint32_t best = 0;
         std::error_code ec;
         for (const auto& entry : std::filesystem::directory_iterator(movi_options.get_index_dir(), ec)) {
@@ -268,16 +275,26 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                 name.compare(name.size() - 4, 4, ".bin") == 0) {
                 const std::string kstr = name.substr(5, name.size() - 9);
                 if (!kstr.empty() && std::all_of(kstr.begin(), kstr.end(), ::isdigit)) {
-                    uint32_t k = static_cast<uint32_t>(std::stoul(kstr));
-                    if (k > best && k <= cap) best = k;
+                    uint32_t fk = static_cast<uint32_t>(std::stoul(kstr));
+                    if (fk > best && fk <= cap) best = fk;
                 }
             }
         }
         if (best > 1) {
             movi_options.set_ftab_k(best);
-            INFO_MSG("MEM: auto-selected ftab-k=" + std::to_string(best) +
-                     " (deepest ftab no longer than the minimum MEM length).");
+            INFO_MSG(what + ": auto-selected ftab-k=" + std::to_string(best) +
+                     " (deepest ftab that fits the query).");
         }
+    }
+
+    // Reject an explicit --ftab-k longer than the k-mer length (a longer ftab looks up a
+    // k-mer longer than the query, over-constraining the seed).
+    if (movi_options.is_kmer() && movi_options.get_ftab_k() != 0 &&
+        movi_options.get_ftab_k() > static_cast<uint32_t>(movi_options.get_k())) {
+        throw std::runtime_error(ERROR_MSG("For k-mer queries, --ftab-k (" +
+            std::to_string(movi_options.get_ftab_k()) + ") must not exceed k (" +
+            std::to_string(movi_options.get_k()) + "). Use --ftab-k <= k (ftab-k == k resolves the "
+            "whole k-mer in one lookup)."));
     }
 
     if (movi_options.get_ftab_k() != 0) {

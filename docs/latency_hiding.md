@@ -59,17 +59,26 @@ The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id 
 
 - MEM has no manual-strand path; its coroutine version is correct but compute-bound
   (the per-run scans dominate, so there is little latency to hide).
-- **MEM speed / ftab:** MEM search is accelerated by the ftab, and a deeper ftab means
-  fewer and cheaper bidirectional `extend_bidirectional` steps. `movi query --mem`
-  auto-selects the deepest `ftab.<k>.bin` in the index that is **shorter than
-  `--min-mem-length`** when `--ftab-k` is not given, so build an ftab-12
-  (`movi ftab --ftab-k 12`) for the best MEM throughput. (`--ftab-k` must be strictly
-  less than the minimum MEM length: an ftab that long over-extends the BML seed and
-  makes `query_mem_bml` loop, so an explicit out-of-range `--ftab-k` is now rejected.)
-  With ftab-12 the length-thresholded (BML, `--min-mem-length` above ~1) MEM query is
-  within ~5.5x of k-mer at HPRC scale and faster than k-mer at E. coli scale. The one
-  slow case is all-MEM enumeration (`--min-mem-length 1`, `query_all_mems`), where the
-  `O(#runs)` skip-count + rc-walk scan explodes on large, highly-repeated intervals.
+- **ftab auto-selection (MEM and k-mer):** the ftab accelerates both MEM and k-mer
+  queries (it only accelerates -- results are ftab-independent), and the deepest
+  applicable ftab is fastest. When `--ftab-k` is not given, `movi query` auto-selects the
+  deepest `ftab.<k>.bin` in the index that fits the query:
+  - `--mem`: the deepest ftab **no longer than `--min-mem-length`**. `--ftab-k ==
+    min-mem-length` is ideal (the ftab seeds the whole minimum window in one lookup, zero
+    bidirectional extend steps); a longer ftab over-extends the BML seed left of the
+    intended MEM start, so an explicit `--ftab-k > --min-mem-length` is rejected. The
+    all-MEM path (`--min-mem-length <= 1`, `query_all_mems`) is uncapped.
+  - `--kmer`: the deepest ftab **no longer than `k`**. `--ftab-k == k` resolves the whole
+    k-mer in one lookup; a longer ftab would look up a k-mer longer than the query, so an
+    explicit `--ftab-k > k` is rejected. The look-ahead ("fishing") heuristic shrinks its
+    step as the ftab deepens and skips the look-ahead entirely at `--ftab-k == k`.
+
+  Build an ftab-12 (`movi ftab --ftab-k 12`) for the best MEM throughput; ecoli100 k-mer
+  is about 1.76x faster with ftab-10 than with no ftab. With ftab-12 the
+  length-thresholded (BML, `--min-mem-length` above ~1) MEM query is within ~5.5x of k-mer
+  at HPRC scale and faster than k-mer at E. coli scale. The one slow case is all-MEM
+  enumeration (`--min-mem-length 1`, `query_all_mems`), where the `O(#runs)` skip-count +
+  rc-walk scan explodes on large, highly-repeated intervals.
 - The coroutine PML body is an inline reimplementation of the PML loop; the MEM and
   k-mer coroutines instead reuse the shared search primitives.
 - The manual-strand path (b) is deliberately **one shared scheduler**, not per-query

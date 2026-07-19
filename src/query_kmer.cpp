@@ -91,13 +91,18 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
 
 
     int32_t step = k/3;
-    // k - step has to be always greater than ftab-k
-    if (k - step < ftab_k) {
-        step = k - ftab_k - 1;
+    // The look-ahead ("fishing") subproblem has length k - step, which must stay >= ftab_k
+    // so the ftab lookup fits inside it; a deep ftab shrinks the step. When ftab_k >= k
+    // there is no room for a look-ahead skip, and step = k - ftab_k - 1 would go negative
+    // (making the look-ahead peek past the read end). Clamp to 0 and skip the look-ahead
+    // in that case -- an ftab_k-mer already resolves the whole k-mer in one lookup.
+    if (k - step < static_cast<int32_t>(ftab_k)) {
+        step = k - static_cast<int32_t>(ftab_k) - 1;
     }
+    if (step < 0) step = 0;
 
     while (pos_on_r >= k - 1) {
-        if (pos_on_r >= k -1 + step and !look_ahead_backward_search(mq, pos_on_r, step)) {
+        if (step > 0 && pos_on_r >= k -1 + step and !look_ahead_backward_search(mq, pos_on_r, step)) {
             #pragma omp atomic
             kmer_stats.look_ahead_skipped += step + 1;
             pos_on_r = pos_on_r - step - 1;

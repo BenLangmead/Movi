@@ -740,11 +740,12 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
 
             int32_t step = k / 3;
             if (k - step < static_cast<int32_t>(ftab_k)) step = k - static_cast<int32_t>(ftab_k) - 1;
+            if (step < 0) step = 0;   // ftab_k >= k: no look-ahead room (mirrors query_all_kmers)
 
             while (pos_on_r >= k - 1) {
                 bool did_search = true;
 
-                if (pos_on_r >= k - 1 + step) {
+                if (step > 0 && pos_on_r >= k - 1 + step) {
                     // ---- look_ahead_backward_search(mq, pos_on_r, step) inlined ----
                     uint64_t la_match_len = 0;
                     int32_t la_pos = pos_on_r - step;
