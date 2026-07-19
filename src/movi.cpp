@@ -111,10 +111,9 @@ void handle_kmer(MoveQuery& mq, MoviOptions& movi_options,
         ks.agg_positive += mq.found_kmer_count;
     }
 
-    // Emit per-k-mer output in both presence and count modes.  (Count mode now
-    // populates the same per-k-mer string via add_kmer, so it is no longer
-    // suppressed here.)  The sshash format suppresses per-read lines (handled in
-    // output_kmers) and prints its aggregate report once at the end.
+    // Emit per-k-mer output in both presence and count modes; count mode populates
+    // the same per-k-mer string via add_kmer.  The sshash format suppresses per-read
+    // lines (handled in output_kmers) and prints its aggregate report once at the end.
     if (movi_options.write_output_allowed()) {
         #pragma omp critical(movi_output)
         {

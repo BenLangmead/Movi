@@ -154,10 +154,9 @@ std::string query_type(MoviOptions& movi_options);
 
 // Branch-free complement via a compile-time lookup table. `constexpr` forces
 // static (compile-time) initialization, so there is no thread-safe-init guard
-// branch and no runtime table build; `inline` lets it fold into the per-run scan
-// loops in the MEM/bidirectional search, where the old nested-ternary
-// out-of-line complement() was ~25% of query cycles (PMU profile, 2026-06-19).
-// Mapping is unchanged: A<->T, C<->G, SEPARATOR->SEPARATOR, anything else -> 'A'.
+// branch and no runtime table build; `inline` lets it fold into the hot per-run
+// scan loops in the MEM/bidirectional search.
+// Mapping: A<->T, C<->G, SEPARATOR->SEPARATOR, anything else -> 'A'.
 inline char complement(char c) {
     static constexpr std::array<char, 256> table = [] {
         std::array<char, 256> t{};

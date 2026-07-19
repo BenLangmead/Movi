@@ -111,9 +111,8 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                 // Count via the single-kmer presence search (same path as --kmer-bv,
                 // minus the MPHF id): the BWT interval size is the k-mer's occurrence
                 // count on the doubled (fwd+rc) text = occ(x)+occ(rc(x)) = KMC's
-                // canonical count.  The old query_kmers_from_bidirectional path assumed
-                // an ftab (it set ftab_right = kmer_left + ftab_k - 1 and asserted the
-                // init advanced to kmer_left) and threw with the default ftab_k = 0.
+                // canonical count.  This path needs no ftab, so it works with the
+                // default ftab_k = 0.
                 MoveInterval interval;
                 uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r, /*single=*/true, &interval);
                 if (found_kmer_count > 0 && !interval.is_empty()) {
@@ -127,10 +126,9 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
             } else {
                 if (movi_options->is_kmer_bv()) {
                     // Fast keep-going MPHF-id walk: positive-skip presence + per-k-mer
-                    // canonical id (lazy-rc inside). 2.2x faster than the per-k-mer
-                    // single-search path (1.61 vs 0.73 M/s, ecoli100 k31), with
-                    // byte-identical ids. The count field shows presence (1); use
-                    // --kmer-count --kmer-bv for occurrence counts.
+                    // canonical id (lazy-rc inside). Produces the same ids as the
+                    // per-k-mer single-search path. The count field shows presence (1);
+                    // use --kmer-count --kmer-bv for occurrence counts.
                     uint64_t found = query_kmers_id_bv(mq, pos_on_r);
                                         ks.positive_kmers += found;
                 } else {
