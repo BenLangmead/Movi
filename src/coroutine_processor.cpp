@@ -65,11 +65,14 @@ using std::chrono::steady_clock;
 using std::chrono::duration_cast;
 using std::chrono::duration;
 
-// Coroutine latency hiding is only implemented for the regular-thresholds index
-// (mode 6, non-color). Under any other MODE/COLOR_MODE this translation unit
-// compiles to nothing, so it is safe to keep in the shared MOVI_SOURCES; the
-// `movi query --coroutine` dispatch in movi.cpp is guarded by the same condition.
-#if MODE == 6 && COLOR_MODE == 0
+// Coroutine latency hiding is implemented for the threshold index modes -- regular-
+// thresholds (6), sampled-thresholds (7), and blocked-thresholds (8) -- in non-color
+// builds. Those are the modes that carry the thresholds PML/MEM/k-mer queries need,
+// and the engine uses the mode-portable move-structure primitives throughout. Under
+// any other MODE/COLOR_MODE this translation unit compiles to nothing, so it is safe
+// to keep in the shared MOVI_SOURCES; the `movi query --coroutine` dispatch in
+// movi.cpp is guarded by the same condition.
+#if (MODE == 6 || MODE == 7 || MODE == 8) && COLOR_MODE == 0
 
 // The only cross-cutting global the query bodies need: the debug flag read by the
 // DEBUG_MSG_CO macro. All per-query parameters (query mode, k, ftab_k, min-mem,
@@ -317,9 +320,7 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
     int coroutine_id) {
     
     int read_count = 0;  // only used by DEBUG_MSG_CO tracing below
-    const bool use_separator = this->use_separator();
-    const int sep_adjust = use_separator ? 1 : 0;
-    
+
     // Per-coroutine work buffer reused across reads (cleared, not reallocated,
     // each read) so there is no per-read heap churn.
     std::vector<uint16_t> matching_lens;
@@ -347,97 +348,33 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
         assert(idx < rlbwt.size());
         assert(offset < get_n(idx));
 
-        // The PML inner loop below inlines the repositioning and the LF/fast-forward
-        // step, rather than calling the shared reposition_thresholds / get_id / LF_move
-        // primitives (as the MEM and k-mer coroutines do). This is a deliberate
-        // performance choice: PML's per-step work is so small that, once latency hiding
-        // is engaged, the un-inlined primitive calls dominate. On a c5.metal box (7 reps,
-        // W=8) the inlined loop runs ~109 ns/base vs ~130 for the primitive-reusing
-        // version (~19%); LTO and __attribute__((flatten)) recover only ~5 ns of that
-        // gap, so the difference is structural, not just un-inlined calls. If you edit
-        // this loop, re-validate byte-for-byte against `movi query --pml` (the
+        // The PML loop mirrors the sequential query_pml, using the same mode-portable
+        // primitives (get_c / reposition_thresholds / get_id / get_n / get_offset) so it
+        // works in every threshold index mode (regular-, sampled-, and blocked-thresholds),
+        // not just mode 6. The single latency-hiding point is the LF destination row: its
+        // id (get_id) is prefetched, then co_yield lets other coroutines run while that
+        // cache line fills. Repositioning is a sequential run scan with no long-range
+        // jump, so it stays a plain call with no yield. If you edit this loop, re-validate
+        // byte-for-byte against `movi query --pml` (the
         // tests/regression_coroutine_separators.sh check does exactly this).
+        uint64_t scan_count = 0;   // reposition scan length (needed by the reposition API)
         while (roff > -1) {
             DEBUG_MSG_CO("DEBUG: Coroutine %d processing, roff=%d\n", coroutine_id, roff);
-            char row_c_id = static_cast<char>((rlbwt[idx].n & (~mask_c)) >> SHIFT_C);
-            char row_c = alphabet[row_c_id];
+            char row_c = alphabet[rlbwt[idx].get_c()];
             if (!check_alphabet(R[roff])) {  // char doens't exist in reference
                 match_len = 0;
             } else if (row_c == R[roff]) {   // Case 1: Match
                 match_len++;
-            } else {                         // Case 2: Reposition
-                const char r_ch = R[roff];
-                uint64_t r_ch_id = alphamap[static_cast<uint64_t>(r_ch)];
-                uint64_t saved_idx = idx;
-                bool up = false;
-                if (idx == end_bwt_idx) {
-                    up = offset < end_bwt_idx_thresholds[r_ch_id];
-                    if (up) { // reposition up
-                        if (saved_idx == 0) {
-                            idx = r;
-                        } else {
-                            char row_c_up_id = static_cast<char>((rlbwt[saved_idx].n & (~mask_c)) >> SHIFT_C);
-                            uint64_t repo_idx = saved_idx;
-                            while (repo_idx > 0 && row_c_up_id != r_ch_id) {
-                                repo_idx--;
-                                row_c_up_id = static_cast<char>((rlbwt[repo_idx].n & (~mask_c)) >> SHIFT_C);
-                            }
-                            idx = (row_c_up_id == r_ch_id) ? repo_idx : r;
-                        }
-                        assert(idx < saved_idx);
-                    } else { // reposition down
-                        if (saved_idx == r - 1) {
-                            idx = r;
-                        } else {
-                            char row_c_dn_id = static_cast<char>((rlbwt[saved_idx].n & (~mask_c)) >> SHIFT_C);
-                            uint64_t repo_idx = saved_idx;
-                            while (repo_idx < r - 1 && row_c_dn_id != r_ch_id) {
-                                repo_idx++;
-                                row_c_dn_id = static_cast<char>((rlbwt[repo_idx].n & (~mask_c)) >> SHIFT_C);
-                            }
-                            idx = (row_c_dn_id == r_ch_id) ? repo_idx : r;
-                        }
-                        assert(idx > saved_idx);
-                    }
-                } else {
-                    // Handle both separator and non-separator cases
-                    assert(!use_separator || r_ch_id != 0);
-                    uint64_t r_ch_id_adj = r_ch_id - sep_adjust;
-                    uint64_t threshold_value;
-                    if (use_separator && row_c == SEPARATOR) {
-                        // Handle separator case - use separators_thresholds
-                        threshold_value = separators_thresholds[separators_thresholds_map[idx]].values[r_ch_id_adj];
-                    } else {
-                        // Regular case - use alphamap_3 (with or without separator adjustment)
-                        r_ch_id_adj = alphamap_3[row_c_id - sep_adjust][r_ch_id_adj];
-                        assert(r_ch_id_adj != 3);
-                        threshold_value = get_thresholds(idx, r_ch_id_adj);
-                    }
-                    
-                    if (offset < threshold_value) {
-                        up = true;
-                        char row_c_up_id = static_cast<char>((rlbwt[saved_idx].n & (~mask_c)) >> SHIFT_C);
-                        uint64_t repo_idx = saved_idx;
-                        while (repo_idx > 0 && row_c_up_id != r_ch_id) {
-                            repo_idx--;
-                            row_c_up_id = static_cast<char>((rlbwt[repo_idx].n & (~mask_c)) >> SHIFT_C);
-                        }
-                        idx = (row_c_up_id == r_ch_id) ? repo_idx : r;
-                        assert(idx < saved_idx);
-                    } else {
-                        char row_c_dn_id = static_cast<char>((rlbwt[saved_idx].n & (~mask_c)) >> SHIFT_C);
-                        uint64_t repo_idx = saved_idx;
-                        while (repo_idx < r - 1 && row_c_dn_id != r_ch_id) {
-                            repo_idx++;
-                            row_c_dn_id = static_cast<char>((rlbwt[repo_idx].n & (~mask_c)) >> SHIFT_C);
-                        }
-                        idx = (row_c_dn_id == r_ch_id) ? repo_idx : r;
-                        assert(idx > saved_idx);
-                    }
-                }
+            } else {                         // Case 2: reposition (up or down)
+                // Repositioning is a sequential run scan with no long-range jump, so it
+                // calls the shared, mode-portable primitive instead of an inlined mode-6
+                // copy -- there is no prefetch/co_yield here. This is exactly what the
+                // sequential query_pml does, so the PMLs stay byte-identical.
+                bool up = movi_options->is_random_repositioning()
+                            ? reposition_randomly(idx, offset, R[roff], scan_count)
+                            : reposition_thresholds(idx, offset, R[roff], scan_count);
                 match_len = 0;
-                assert(idx < r);
-                assert(idx < rlbwt.size());
+                assert(idx < r && idx < rlbwt.size());
                 assert(alphabet[rlbwt[idx].get_c()] == R[roff] && "Repositioning failed - character mismatch");
                 offset = up ? (get_n(idx) - 1) : 0;
             }
@@ -452,18 +389,10 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
                                     : static_cast<uint16_t>(match_len));
             roff--; // move left by 1 on query
             
-            // Begin LF step.  Start by computing index of next row id where this
-            // row maps
-            auto& row = rlbwt[idx];
-            uint64_t new_idx;
-            if (row.offset >= (1U << 12)) {
-                uint64_t res = static_cast<uint64_t>((row.offset & ~0x0FFF) >> 12) << 32;
-                uint64_t rowid = static_cast<uint64_t>(row.id);
-                rowid = rowid | res;
-                new_idx = rowid;
-            } else {
-                new_idx = static_cast<uint64_t>(row.id);
-            }
+            // Begin LF step. The destination row id is the one long-range jump; get_id
+            // is the mode-portable accessor (a direct field in mode 6, a block or tally
+            // lookup in the blocked/sampled-threshold modes). Prefetch it, then yield.
+            uint64_t new_idx = get_id(idx);
             my_prefetch_r((void*)(&(rlbwt[0]) + new_idx));
             offset = get_offset(idx) + offset;
             DEBUG_MSG_CO("DEBUG: Coroutine %d about to co_yield (prefetch)\n", coroutine_id);

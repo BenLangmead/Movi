@@ -286,8 +286,8 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
     open_output_files(movi_options, output_files);
     mv_.set_output_files(&output_files);
 
-#if MODE == 6 && COLOR_MODE == 0
-    // Coroutine latency-hiding dispatch (regular-thresholds, non-color only). Route
+#if (MODE == 6 || MODE == 7 || MODE == 8) && COLOR_MODE == 0
+    // Coroutine latency-hiding dispatch (threshold index modes, non-color only). Route
     // the queries whose coroutine output is byte-identical to the sequential path:
     // PML, MEM, and every k-mer query except the MPHF-id lookup. Among k-mer queries
     // that is presence (F,F), plain count (T,F), and bitvector count (T,T); only the
@@ -324,8 +324,8 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
 #else
     if (movi_options.is_coroutine()) {
         std::cerr << "[movi] note: --coroutine latency hiding is only implemented for the "
-                     "regular-thresholds index (mode 6, non-color); running the sequential path "
-                     "instead." << std::endl;
+                     "threshold index modes (regular-, sampled-, or blocked-thresholds, non-color); "
+                     "running the sequential path instead." << std::endl;
     }
 #endif
 
