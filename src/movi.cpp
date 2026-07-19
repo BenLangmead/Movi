@@ -302,6 +302,21 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
         INFO_MSG("Ftab was read!");
     }
 
+    // Counting with the k-mer bitvector resolves each present k-mer with a
+    // predecessor/successor lookup instead of a per-k-mer backward search, so it is
+    // faster and its lead grows with k (about 2x at k=31 and 3x at k=63 on ecoli100),
+    // for byte-identical counts. It needs the per-k kmerbv.<k>.* structures, so point
+    // the user at it only when this index already has them for the k being queried.
+    if (movi_options.is_kmer_count() && !movi_options.is_kmer_bv()) {
+        const std::string bv_meta = movi_options.get_index_dir() + "/kmerbv." +
+                                    std::to_string(movi_options.get_k()) + ".meta";
+        if (std::filesystem::exists(bv_meta)) {
+            INFO_MSG("This index has a k-mer bitvector for k=" +
+                     std::to_string(movi_options.get_k()) +
+                     "; adding --kmer-bv counts faster with identical output.");
+        }
+    }
+
 #if TALLY_MODES
     if (movi_options.is_zml() or movi_options.is_count()) {
         //TODO: Implement tally modes for zml and count queries.

@@ -83,6 +83,30 @@ The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id 
   at HPRC scale and faster than k-mer at E. coli scale. The one slow case is all-MEM
   enumeration (`--min-mem-length 1`, `query_all_mems`), where the `O(#runs)` skip-count +
   rc-walk scan explodes on large, highly-repeated intervals.
+- **Counting k-mers: `--kmer-count` vs `--kmer-count --kmer-bv`.** Both emit
+  byte-identical counts. The bitvector path is faster, and its lead widens with k
+  (ecoli100, 8000 x 150 bp reads, load-excluded, one thread):
+
+  | k | `--kmer-count` | `--kmer-count --kmer-bv` | speedup |
+  |---|---|---|---|
+  | 15 | 0.742 s | 0.632 s | 1.17x |
+  | 23 | 0.418 s | 0.227 s | 1.84x |
+  | 31 | 0.498 s | 0.243 s | 2.05x |
+  | 39 | 0.519 s | 0.217 s | 2.39x |
+  | 47 | 0.585 s | 0.233 s | 2.51x |
+  | 63 | 0.597 s | 0.202 s | 2.96x |
+
+  Plain count pays a per-k-mer backward search that gets dearer as k grows, while the
+  bitvector count resolves each present k-mer with a predecessor/successor lookup whose
+  cost is essentially independent of k.
+
+  The tradeoff is that `--kmer-bv` needs the per-k `B_k`/`C_k` structures
+  (`kmerbv.<k>.*`, built by `movi build-kmerbv` for that one k). On ecoli100 they are
+  44 MB at k=15, 68 MB at k=31 and 98 MB at k=63 -- 13-29% of the 341 MB base index
+  apiece -- and keeping all twelve k values costs 875 MB, 2.6x the base index. So use
+  **`--kmer-count --kmer-bv` when k is known and queried repeatedly**, and **plain
+  `--kmer-count` when k varies or is not known ahead of time**: the latter is the
+  k-independent path, one index answering every k with no per-k build or storage.
 - The coroutine PML body is an inline reimplementation of the PML loop; the MEM and
   k-mer coroutines instead reuse the shared search primitives.
 - The manual-strand path (b) is deliberately **one shared scheduler**, not per-query
