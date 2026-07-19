@@ -50,7 +50,10 @@ uint64_t handle_pml_zml(MoveQuery& mq, MoviOptions& movi_options,
         }
 
         if (movi_options.write_output_allowed()) {
-            output_base_stats(DataType::match_length, movi_options.write_stdout_enabled(), output_files.mls_file, mq);
+            std::ostream& mls_dest = movi_options.write_stdout_enabled()
+                ? static_cast<std::ostream&>(std::cout)
+                : static_cast<std::ostream&>(output_files.mls_file);
+            output_base_stats(DataType::match_length, movi_options.write_stdout_enabled(), mls_dest, mq);
 
             if (movi_options.is_get_sa_entries()) {
                 output_base_stats(DataType::sa_entry, movi_options.write_stdout_enabled(), output_files.sa_entries_file, mq);
@@ -298,12 +301,9 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
         CoroutineQueryOptions copts;
         copts.mem_query      = movi_options.is_mem();
         copts.kmer_query     = movi_options.is_kmer();
-        copts.kmer_count     = movi_options.is_kmer_count();
-        copts.kmer_bv        = movi_options.is_kmer_bv();
-        copts.ftab_k         = static_cast<int>(movi_options.get_ftab_k());
-        copts.min_mem_length = static_cast<int>(movi_options.get_min_mem_length());
-        copts.k              = static_cast<int>(movi_options.get_k());
         copts.ordered_output = true;  // emit in input order, matching the sequential path
+        // k, ftab_k, min-mem-length and count/bv mode are read from mv_'s MoviOptions
+        // by the coroutine bodies, so they need not be copied into CoroutineQueryOptions.
         std::ostream& dest = movi_options.is_mem()  ? output_files.mems_file
                            : movi_options.is_kmer() ? output_files.kmer_file
                                                     : output_files.mls_file;

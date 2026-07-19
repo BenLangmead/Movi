@@ -211,10 +211,16 @@ void output_base_stats(DataType data_type, bool to_stdout, std::ostream& output_
 
     if (to_stdout and data_type == DataType::match_length) {
 
-        std::cout << ">" << mq.get_query_id() << "\n";
+        // Write the text form to the PROVIDED stream, not a hard-coded std::cout, so
+        // the destination is the caller's choice: sequential/strand callers pass
+        // std::cout for stdout mode, while the coroutine path formats into an
+        // ostringstream so the result flows through its in-order reorder buffer
+        // (writing straight to std::cout here would bypass that buffer and emit in
+        // completion order).
+        output_file << ">" << mq.get_query_id() << "\n";
         std::reverse(mq.get_matching_lengths_string().begin(), mq.get_matching_lengths_string().end());
-        std::cout << mq.get_matching_lengths_string();
-        std::cout << "\n";
+        output_file << mq.get_matching_lengths_string();
+        output_file << "\n";
 
     } else {
 

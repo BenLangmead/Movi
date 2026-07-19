@@ -14,15 +14,11 @@ class MoveStructure;  // forward declaration; the core entry point takes it by r
 
 struct CoroutineQueryOptions {
     bool debug = false;
-    bool bpf_output = false;      // write binary BPF output instead of text (PML only)
     bool ordered_output = false;  // emit reads in input order (reorder buffer); else completion order
-    bool mem_query = false;       // --mem
-    bool kmer_query = false;      // --kmer / --kmer-count
-    bool kmer_count = false;      // --kmer-count
-    bool kmer_bv = false;         // use the count bitvector for k-mer counts
-    int ftab_k = 0;
-    int min_mem_length = 0;
-    int k = 0;                    // k-mer length (required for kmer_query)
+    bool mem_query = false;       // run the MEM coroutine (else k-mer if kmer_query, else PML)
+    bool kmer_query = false;      // run the k-mer coroutine
+    // Per-query parameters (k, ftab_k, min-mem-length, count/bv mode) are read from the
+    // MoveStructure's MoviOptions by the query bodies, so they are not duplicated here.
 };
 
 // Entry point: drive the coroutine scheduler over an already-loaded MoveStructure

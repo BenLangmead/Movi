@@ -1,5 +1,6 @@
 #include "read_processor.hpp"
 #include <cpuid.h>
+#include <iostream>
 
 ReadProcessor::ReadProcessor(MoveStructure& mv_, int strands_, bool verbose_, bool reverse_, OutputFiles& output_files_, Classifier& classifier_) :
     mv(mv_), output_files(output_files_), classifier(classifier_) {
@@ -503,7 +504,10 @@ void ReadProcessor::write_mls(Strand& process) {
         } else {
             if ((mv.movi_options->is_report_colors() or mv.movi_options->is_report_color_ids()) && mv.movi_options->write_output_allowed()) {
                 // Writing the PMLs
-                output_base_stats(DataType::match_length, mv.movi_options->write_stdout_enabled(), output_files.mls_file, process.mq);
+                std::ostream& mls_dest = mv.movi_options->write_stdout_enabled()
+                    ? static_cast<std::ostream&>(std::cout)
+                    : static_cast<std::ostream&>(output_files.mls_file);
+                output_base_stats(DataType::match_length, mv.movi_options->write_stdout_enabled(), mls_dest, process.mq);
 
                 // Writing the colors
                 output_base_stats(DataType::color, mv.movi_options->write_stdout_enabled(), output_files.colors_file, process.mq);
@@ -579,7 +583,10 @@ void ReadProcessor::write_mls(Strand& process) {
 
         if (mv.movi_options->write_output_allowed()) {
 
-            output_base_stats(DataType::match_length, mv.movi_options->write_stdout_enabled(), output_files.mls_file, process.mq);
+            std::ostream& mls_dest = mv.movi_options->write_stdout_enabled()
+                ? static_cast<std::ostream&>(std::cout)
+                : static_cast<std::ostream&>(output_files.mls_file);
+            output_base_stats(DataType::match_length, mv.movi_options->write_stdout_enabled(), mls_dest, process.mq);
 
             if (mv.movi_options->is_get_sa_entries()) {
                 output_base_stats(DataType::sa_entry, mv.movi_options->write_stdout_enabled(), output_files.sa_entries_file, process.mq);

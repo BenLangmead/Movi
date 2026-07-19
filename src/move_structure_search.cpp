@@ -75,7 +75,8 @@ bool MoveStructure::extend_bidirectional(char c_, MoveInterval& fw_interval, Mov
         // -> count of c_ in fw_before = count of the new fw_interval (bidirectional
         // BWT invariant), used for the rc end walk below in place of a separate
         // fw_interval.count(rlbwt) pass (a 3rd O(#runs) scan; ~6% of MEM query
-        // cycles per PMU profile, 2026-06-19). Mirrors movi_co.cpp's fused scan.
+        // cycles per PMU profile, 2026-06-19). Mirrors the coroutine MEM fused scan
+        // in coroutine_processor.cpp.
         uint64_t skip = 0, fw_count = 0;
         uint64_t current_run = fw_interval_before_extension.run_start;
         uint64_t current_offset = fw_interval_before_extension.offset_start;

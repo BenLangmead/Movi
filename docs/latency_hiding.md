@@ -26,9 +26,10 @@ entries) are worth hiding; sequential run scans are left to the hardware prefetc
 | (c) coroutines | `coroutine_processor.cpp` (the `query_*_coroutine` bodies + scheduler + `run_coroutine_query`; guarded to `MODE==6 && COLOR_MODE==0`). Reached via **`movi query --coroutine`** (dispatch in `movi.cpp` `query()`), which routes PML, MEM, plain k-mer presence, and count-bv through the coroutine — all byte-identical to the sequential path. |
 
 The k-mer-bitvector add-ons (SSHash-style MPHF IDs and the run-local exact count)
-all live in `query_kmer_bv.cpp`: the build/load (`build_kmerbv`, `load_kmerbv`),
-the bv queries (`query_kmers_count_bv`, `query_kmers_id_bv`), and the
-`kmer_count_from_bv` helper.
+live in `query_kmer_bv.cpp`: the build/load (`build_kmerbv`, `load_kmerbv`) and the
+bv queries (`query_kmers_count_bv`, `query_kmers_id_bv`). The small
+`kmer_count_from_bv` predecessor/successor helper is an inline in
+`include/move_structure.hpp`.
 
 ## Coverage grid
 
@@ -60,3 +61,9 @@ The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id 
   branches. The scheduler itself is query-agnostic, so splitting it per query would
   duplicate it; the coverage grid above maps which queries it serves. (k-mer and MEM
   are not served by the strand scheduler — see the grid.)
+- **Output ordering:** all coroutine query output is **content byte-identical** to the
+  sequential path (per-read values), and is emitted in deterministic **input order** via
+  the `OrderedEmitter` reorder buffer (`output_base_stats`/`output_kmers`/`output_mems`
+  write into an `ostringstream`, not straight to `std::cout`). The sequential `--pml`
+  stdout stream is itself emitted in batch-loader order, which varies with read length,
+  so exact stream order can differ; downstream consumers key on the read name (`>id`).

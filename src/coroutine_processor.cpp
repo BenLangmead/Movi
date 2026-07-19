@@ -1,17 +1,14 @@
-// coroutine_processor.cpp: coroutine-based latency hiding (query style "(c)") -- the engine
-// movi-co: coroutine-based latency hiding (query implementation "style (c)")
+// coroutine_processor.cpp: coroutine-based latency hiding -- query style "(c)" -- the engine.
 //
-// Movi runs each hot query in up to three styles; this file is style (c):
-//   (a) sequential, no latency hiding:
-//         move_structure_query.cpp (query_pml/query_zml),
-//         query_kmer.cpp (query_all_kmers/query_kmers_from),
-//         query_mem.cpp (query_mems/query_mem_bml).
-//   (b) manual "strand" state machine: prefetch, then hand-switch among
-//         in-flight reads at each prefetch point:
-//         read_processor.cpp (process_latency_hiding, kmer_search_latency_hiding),
+// Movi runs each hot query in up to three latency-hiding styles (docs/latency_hiding.md
+// is the full map); this file is style (c):
+//   (a) sequential, no latency hiding: query_pml.cpp, query_zml.cpp, query_kmer.cpp,
+//         query_kmer_bv.cpp, query_mem.cpp (shared primitives in move_structure_search.cpp).
+//   (b) manual "strand" state machine: read_processor.cpp (process_latency_hiding),
 //         struct Strand in read_processor.hpp.
-//   (c) coroutines (this file): prefetch, then co_yield at each prefetch point;
-//         the scheduler resumes another coroutine while the cache line fills.
+//   (c) coroutines (this file): prefetch, then co_yield at each prefetch point; the
+//         scheduler resumes another coroutine while the cache line fills. Reached from
+//         the main movi binary via `movi query --coroutine` (dispatch in movi.cpp).
 //
 // The pattern in every query_*_coroutine below: compute the LF destination row
 // id (step_prep), prefetch it, co_yield, then dereference it on resume
@@ -23,8 +20,8 @@
  * Author: Ben Langmead
  * Date: Oct 4, 2025
  *
- * Simple program to compute Pseudo Matching Lengths (PMLs) for reads.  Meant
- * to be a starting point for work on using co-routines.
+ * The C++20-coroutine latency-hiding query engine for Movi (PML, MEM and k-mer
+ * queries), linked into the main movi binary and driven by `movi query --coroutine`.
  *
  * Distributed under the GPL3 license.
  * See accompanying LICENSE or https://opensource.org/license/gpl-3-0
@@ -73,22 +70,12 @@ using std::chrono::duration;
 // translation unit compiles to nothing, so it is safe in the shared MOVI_SOURCES.
 #if MODE == 6 && COLOR_MODE == 0
 
-// Global debug flag
+// The only cross-cutting global the query bodies need: the debug flag read by the
+// DEBUG_MSG_CO macro. All per-query parameters (query mode, k, ftab_k, min-mem,
+// count/bv flags) are read directly from the MoveStructure's MoviOptions in the
+// bodies, and the scheduler reads them from the CoroutineQueryOptions argument, so
+// no per-query file-scope globals are needed.
 static bool debug_enabled = false;
-// When set, write binary BPF output (like mainline Movi) instead of text.
-static bool g_bpf_output = false;
-// When true (--reorder), emit reads in input order via the reorder buffer;
-// default is completion order (lower overhead, matches mainline Movi's order).
-static bool g_ordered_output = false;
-// MEM query mode (movi-co also supports --mem) and its parameters.
-static bool g_mem_query = false;
-static int  g_ftab_k = 0;
-static int  g_min_mem_length = 0;
-// k-mer query mode (movi-co also supports --kmer / --kmer-count) and its length.
-static bool g_kmer_query = false;
-static bool g_kmer_count = false;
-static bool g_kmer_bv = false;   // use the count bitvector (pred/succ) for counts
-static int  g_k = 0;
 
 // Setup buffered stdout and stderr
 static FILE* stdout_buf = nullptr;
@@ -105,59 +92,6 @@ static void init_buffered_io() {
     setvbuf(stderr_buf, nullptr, _IOLBF, 0);
 }
 
-// Custom function to write unsigned integer to buffer, digit by digit
-// Returns number of bytes written
-static size_t write_uint_to_buffer(char* buffer, size_t buffer_size, uint64_t value) {
-    if (buffer_size == 0) return 0;
-    
-    // Handle zero case
-    if (value == 0) {
-        if (buffer_size > 0) {
-            buffer[0] = '0';
-            return 1;
-        }
-        return 0;
-    }
-    
-    // Calculate number of digits
-    uint64_t temp = value;
-    int num_digits = 0;
-    while (temp > 0) {
-        num_digits++;
-        temp /= 10;
-    }
-    
-    // Write digits from least to most significant, then reverse
-    if (static_cast<size_t>(num_digits) > buffer_size) {
-        num_digits = static_cast<int>(buffer_size);
-    }
-    
-    char* digits = buffer;
-    temp = value;
-    for (int i = 0; i < num_digits; i++) {
-        digits[i] = '0' + (temp % 10);
-        temp /= 10;
-    }
-    
-    // Reverse the digits
-    for (int i = 0; i < num_digits / 2; i++) {
-        char tmp = digits[i];
-        digits[i] = digits[num_digits - 1 - i];
-        digits[num_digits - 1 - i] = tmp;
-    }
-    
-    return static_cast<size_t>(num_digits);
-}
-
-// Custom function to write string to buffer
-static size_t write_string_to_buffer(char* buffer, size_t buffer_size, const char* str, size_t str_len) {
-    size_t copy_len = (str_len < buffer_size) ? str_len : buffer_size;
-    if (copy_len > 0) {
-        std::memcpy(buffer, str, copy_len);
-    }
-    return copy_len;
-}
-
 // DEBUG macro that only prints when NDEBUG is not defined and debug flag is set
 // Uses fprintf-style format strings
 #ifndef NDEBUG
@@ -166,17 +100,10 @@ static size_t write_string_to_buffer(char* buffer, size_t buffer_size, const cha
 #define DEBUG_MSG_CO(...) ((void)0)
 #endif
 
-// Mutex for thread-safe output from concurrent coroutines
-static std::mutex output_mutex;
-
-// Flush interval for periodic flushing
-static constexpr int FLUSH_INTERVAL = 100;  // Flush every 100 lines
-
 // In-order, chunked output emitter. Coroutines finish reads out of order; this
 // buffers completed lines and writes them in input (read) order, so downstream
 // tools see the same order as the input. Single-threaded (the scheduler resumes
 // one coroutine at a time), so no locking is needed.
-static constexpr size_t OUTPUT_BUFFER_SIZE = 65536;
 struct OrderedEmitter {
     uint64_t next_emit = 0;
     bool ordered = false;         // when true, buffer + write in input order; else completion order
@@ -1026,22 +953,13 @@ void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concur
                          const CoroutineQueryOptions& opts, std::ostream& out) {
     init_buffered_io();
     g_emitter.out = &out;
-    debug_enabled     = opts.debug;
-    g_bpf_output      = opts.bpf_output;
-    g_ordered_output  = opts.ordered_output;
-    g_mem_query       = opts.mem_query;
-    g_kmer_query      = opts.kmer_query;
-    g_kmer_count      = opts.kmer_count;
-    g_kmer_bv         = opts.kmer_bv;
-    g_ftab_k          = opts.ftab_k;
-    g_min_mem_length  = opts.min_mem_length;
-    g_k               = opts.k;
+    debug_enabled = opts.debug;
 
     // No per-run PML header is written here: PML output goes through the shared
     // output_base_stats (per-read). When writing to a file, the one-time BPFHeader is
     // written by open_output_files; stdout PML has no header. This matches the
     // sequential path, so coroutine PML output is byte-identical to it.
-    g_emitter.ordered = g_ordered_output;
+    g_emitter.ordered = opts.ordered_output;
     
     auto start_time = steady_clock::now();
     int64_t total_bases = 0;
@@ -1056,9 +974,9 @@ void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concur
     
     // Initialize all coroutines - use move semantics
     for (int i = 0; i < concurrency; ++i) {
-        if (g_mem_query)
+        if (opts.mem_query)
             coroutines.push_back(std::move(mv.query_mem_coroutine(reader, waiting_handles[i], i)));
-        else if (g_kmer_query)
+        else if (opts.kmer_query)
             coroutines.push_back(std::move(mv.query_kmer_coroutine(reader, waiting_handles[i], i)));
         else
             coroutines.push_back(std::move(mv.query_pml_coroutine(reader, waiting_handles[i], i)));
