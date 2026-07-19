@@ -122,4 +122,11 @@ compare_sorted () {  # $1=label  $2...=query flags (without --coroutine/--stdout
 compare_sorted kmer --kmer -k "$K"
 compare_sorted mem  --mem
 
+# Scope note: this test covers the coroutine queries that run on a plain
+# regular-thresholds --separators index (PML, k-mer presence, MEM) in --stdout mode.
+# The remaining routed coroutine query, bitvector count (--kmer-count --kmer-bv),
+# needs a kmer-bv index (movi build-kmerbv, with the per-k B_k/C_k structures) that
+# this lightweight test does not build; its coroutine-vs-sequential equivalence, plus
+# file-mode (-o) byte-identity, are validated by the cluster byte-gate baseline.
+
 echo "[regression] all coroutine-vs-sequential checks passed (PML, k-mer, MEM)"

@@ -316,8 +316,7 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
     coroutine_handle<>& my_handle_storage,
     int coroutine_id) {
     
-    int read_count = 0;
-    int64_t total_bases = 0;
+    int read_count = 0;  // only used by DEBUG_MSG_CO tracing below
     const bool use_separator = this->use_separator();
     const int sep_adjust = use_separator ? 1 : 0;
     
@@ -334,9 +333,7 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
         if (!read_data.valid) break;  // EOF
         
         read_count++;
-        int read_bases = read_data.sequence.length();
-        total_bases += read_bases;
-        
+
         // Process the read in place, without reversing it: query_pml walks the read
         // right-to-left (pos from length-1 down to 0), producing forward-read PMLs.
         // Reversing the read would instead produce the reversed-read PMLs (the
@@ -346,7 +343,6 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
         int32_t roff = R.length() - 1;    // offset in read
         uint64_t idx = r - 1;             // row index
         uint64_t match_len = 0;           // match length (consecurive case 1s) so far
-        uint64_t ff_count_tot = 0, scan_count = 0;
         uint64_t offset = get_n(idx) - 1;
         assert(idx < rlbwt.size());
         assert(offset < get_n(idx));
@@ -474,16 +470,11 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
             co_yield monostate{}; // wait for prefetch
             DEBUG_MSG_CO("DEBUG: Coroutine %d resumed after co_yield\n", coroutine_id);
             uint64_t n = get_n(new_idx);
-            if (new_idx < r - 1 && offset >= n) {
-                uint64_t niter = 0;
-                while (new_idx < r - 1 && offset >= n) {
-                    offset -= n;
-                    niter++;
-                    new_idx++;
-                    n = get_n(new_idx);
-                }
-                assert(niter < numeric_limits<uint16_t>::max());
-                ff_count_tot += static_cast<uint16_t>(niter);
+            // Fast-forward past exhausted runs (the sequential query_pml does the same).
+            while (new_idx < r - 1 && offset >= n) {
+                offset -= n;
+                new_idx++;
+                n = get_n(new_idx);
             }
             idx = new_idx;
         }
