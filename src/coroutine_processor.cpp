@@ -83,7 +83,7 @@ static FILE* stderr_buf = nullptr;
 
 // Initialize buffered I/O
 static void init_buffered_io() {
-    if (stdout_buf != nullptr) return;  // idempotent: safe from both main() and run_coroutine_query()
+    if (stdout_buf != nullptr) return;  // idempotent: safe to call more than once
     stdout_buf = stdout;
     stderr_buf = stderr;
     // Use full buffering for stdout (better performance)
@@ -108,9 +108,9 @@ struct OrderedEmitter {
     uint64_t next_emit = 0;
     bool ordered = false;         // when true, buffer + write in input order; else completion order
     std::map<uint64_t, std::string> pending;  // completed lines awaiting their turn
-    // Output destination. Defaults to stdout (used by the standalone movi-co
-    // binary); the main movi binary sets it to the appropriate output_files
-    // stream so coroutine output lands in the same place as the sequential path.
+    // Output destination, set per run by run_coroutine_query to the appropriate
+    // output_files stream (or std::cout for --stdout) so coroutine output lands in
+    // the same place as the sequential path.
     std::ostream* out = &std::cout;
 
     void write_line(const std::string& line) {

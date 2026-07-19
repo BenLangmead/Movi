@@ -291,7 +291,7 @@ class MoviOptions {
         bool reverse = false;
         bool mmap = false;
         bool prefetch = true;
-        bool coroutine = false;   // C++20 coroutine latency hiding (mode-6 kmer/mem)
+        bool coroutine = false;   // C++20 coroutine latency hiding (mode-6 PML/MEM/k-mer)
         size_t strands = 16;
         size_t threads = 1;
         uint32_t k = 31;

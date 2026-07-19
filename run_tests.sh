@@ -173,19 +173,19 @@ if ! run_test "Classification Tests" "classification-tests"; then
 fi
 ((TOTAL_TESTS++))
 
-# movi-co coroutine separator regression (differential vs production Movi).
-# Builds a multi-sequence --separators index so separator runs exist, then
-# checks movi-co's PMLs match production exactly. Guards the separator-run
-# (and broader inline-reimplementation) bug class.
-print_status "Running movi-co separator regression..."
+# Coroutine separator regression (differential: movi query --pml --coroutine vs
+# sequential). Builds a multi-sequence --separators index so separator runs exist,
+# then checks coroutine PMLs match the sequential path exactly. Guards the
+# separator-run (and broader inline-reimplementation) bug class.
+print_status "Running coroutine separator regression..."
 echo "----------------------------------------"
-if bash "$PROJECT_ROOT/tests/regression_movi_co_separators.sh" "$(pwd)"; then
+if bash "$PROJECT_ROOT/tests/regression_coroutine_separators.sh" "$(pwd)"; then
     echo "----------------------------------------"
-    print_success "movi-co separator regression passed"
+    print_success "coroutine separator regression passed"
     echo ""
 else
     echo "----------------------------------------"
-    print_error "movi-co separator regression failed"
+    print_error "coroutine separator regression failed"
     echo ""
     ((FAILED_TESTS++))
 fi

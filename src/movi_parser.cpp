@@ -160,7 +160,7 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
         ("s,strands", "Number of strands for query", cxxopts::value<int>())
         ("mmap", "Use memory mapping to read the index")
         ("n,no-prefetch", "Disable prefetching for query")
-        ("coroutine", "Use C++20 coroutine latency hiding (regular-thresholds/mode-6 index only; k-mer and MEM)")
+        ("coroutine", "Use C++20 coroutine latency hiding for the query (regular-thresholds/mode-6 index only; PML, MEM, k-mer presence and bitvector count)")
         ("ftab-k", "The length of the ftba kmer", cxxopts::value<uint32_t>())
         ("multi-ftab", "Use ftabs with smaller k values if the largest one fails")
         ("no-output", "Do not write any output, ignores other options about the output");
