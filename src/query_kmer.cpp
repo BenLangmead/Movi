@@ -53,18 +53,6 @@ uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool 
 
             if (interval_out) *interval_out = backward_search_result;
 
-            if (movi_options->is_debug()) {
-                std::ostringstream dbg;
-                int32_t pos_on_r_ = pos_on_r_saved;
-                auto backward_search_result_one_extra_base = backward_search(query_seq, pos_on_r_, initial_interval, k - match_len - 1);
-                dbg << backward_search_result.count(rlbwt) << "----" <<  backward_search_result_one_extra_base.count(rlbwt) << "\n";
-                dbg << backward_search_result << "\n";
-                if (backward_search_result.count(rlbwt) == backward_search_result_one_extra_base.count(rlbwt)) {
-                    // TODO: Use a counter to count the number of such incidents
-                } else {
-                }
-            }
-
             pos_on_r = pos_on_r + k - 2;
 	        return kmers_found;
         } else {

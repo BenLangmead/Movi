@@ -1,15 +1,18 @@
 #!/bin/bash
-# Regression test: coroutine PML (`movi query --pml --coroutine`) must produce
-# EXACTLY the same pseudo-matching lengths as the sequential path on a
-# SEPARATOR-using index.
+# Regression test: the coroutine latency-hiding path (`movi query --coroutine`)
+# must produce exactly the same results as the sequential path on a separator-using
+# index, for every query it routes: PML, k-mer presence, and MEM. PML is checked
+# per-read (exact value arrays by id); k-mer and MEM are checked as sorted-line
+# multisets (order-independent, since the coroutine reorder buffer emits in input
+# order while the sequential path emits in batch order).
 #
-# Why this exists: the coroutine PML body re-implements the PML inner loop inline
-# (suspend points can't cross function calls), and that copy has historically
-# diverged from the sequential path in subtle ways. One bug was a separator-run
-# threshold off-by-one (values[r_ch_id] vs values[r_ch_id_adj]) that produced
-# *silent* single-position errors, only when repositioning off a separator run.
-# A single-sequence reference does NOT create separator runs (only the terminal
-# $), so a meaningful test needs a MULTI-sequence reference built with --separators.
+# Why a separator index: the coroutine PML body inlines the PML inner loop (suspend
+# points can't cross function calls), so it is easy for that inline copy to diverge
+# from the sequential path in ways that only surface when repositioning off a
+# separator run -- e.g. a separator-run threshold off-by-one (values[r_ch_id] vs
+# values[r_ch_id_adj]) causes silent single-position errors. A single-sequence
+# reference does not create separator runs (only the terminal $), so a meaningful
+# test needs a multi-sequence reference built with --separators.
 #
 # Usage:
 #   regression_coroutine_separators.sh [BUILD_DIR]
@@ -57,15 +60,18 @@ PY
     || { echo "ERROR: separator index build failed (threshold pipeline available?)"; exit 2; }
 fi
 
-echo "[regression] running coroutine PML and sequential PML ..."
+# k for the k-mer sub-test; reads must be at least this long. Override via env.
+K="${MOVI_TEST_K:-21}"
+
+echo "[regression] [PML] running coroutine PML and sequential PML ..."
 # Both emit `>id\n<space-separated PMLs>` to stdout via the shared output_base_stats.
 # The coroutine computes the same forward-read PMLs as the sequential path, so
 # the per-read value arrays must match exactly (compared by read id, so the emit
 # order -- reorder-buffer input order vs sequential batch order -- does not matter).
-"$MV" query --index "$IDX" --read "$READS" --pml --coroutine --stdout -s 8 -t 1 > "$WORK/co.out"  2>/dev/null
-"$MV" query --index "$IDX" --read "$READS" --pml             --stdout       -t 1 > "$WORK/seq.out" 2>/dev/null
+"$MV" query --index "$IDX" --read "$READS" --pml --coroutine --stdout -s 8 -t 1 > "$WORK/pml.co"  2>/dev/null
+"$MV" query --index "$IDX" --read "$READS" --pml             --stdout       -t 1 > "$WORK/pml.seq" 2>/dev/null
 
-python3 - "$WORK/co.out" "$WORK/seq.out" <<'PY'
+python3 - "$WORK/pml.co" "$WORK/pml.seq" <<'PY'
 import sys
 def parse(path):
     d={}; rid=None
@@ -77,7 +83,7 @@ co=parse(sys.argv[1]); seq=parse(sys.argv[2])
 shared=[r for r in co if r in seq]
 unmatched=[r for r in seq if r not in co]+[r for r in co if r not in seq]
 bad=[r for r in shared if co[r]!=seq[r]]
-print("reads: coroutine=%d sequential=%d shared=%d unmatched_ids=%d value_mismatches=%d"
+print("  reads: coroutine=%d sequential=%d shared=%d unmatched_ids=%d value_mismatches=%d"
       % (len(co),len(seq),len(shared),len(unmatched),len(bad)))
 if not shared or unmatched or bad:
     print("FAIL: coroutine PML diverges from sequential on a separator index")
@@ -88,3 +94,32 @@ if not shared or unmatched or bad:
     sys.exit(1)
 print("PASS: coroutine PML matches sequential exactly on the separator index (%d reads)"%len(shared))
 PY
+
+# The fold routes MEM and plain k-mer presence through the coroutine too (movi.cpp
+# dispatch), both via the shared output_mems / output_kmers emitters. Their per-read
+# content must be byte-identical to the sequential path. The emit ORDER can differ
+# (reorder-buffer input order vs sequential batch order), so compare the SORTED line
+# multiset -- the project's order-independent "byte-identical content" standard.
+compare_sorted () {  # $1=label  $2...=query flags (without --coroutine/--stdout/-t/-s)
+  local label="$1"; shift
+  echo "[regression] [$label] running coroutine vs sequential ..."
+  "$MV" query --index "$IDX" --read "$READS" "$@" --coroutine --stdout -s 8 -t 1 > "$WORK/$label.co"  2>/dev/null
+  "$MV" query --index "$IDX" --read "$READS" "$@"             --stdout       -t 1 > "$WORK/$label.seq" 2>/dev/null
+  sort "$WORK/$label.co"  > "$WORK/$label.co.sorted"
+  sort "$WORK/$label.seq" > "$WORK/$label.seq.sorted"
+  local nco nseq
+  nco=$(wc -l < "$WORK/$label.co.sorted"); nseq=$(wc -l < "$WORK/$label.seq.sorted")
+  echo "  lines: coroutine=$nco sequential=$nseq"
+  if ! diff -q "$WORK/$label.co.sorted" "$WORK/$label.seq.sorted" >/dev/null; then
+    echo "FAIL: coroutine $label diverges from sequential on a separator index"
+    diff "$WORK/$label.co.sorted" "$WORK/$label.seq.sorted" | head -10
+    exit 1
+  fi
+  [ "$nco" -gt 0 ] || { echo "FAIL: coroutine $label produced no output"; exit 1; }
+  echo "PASS: coroutine $label matches sequential exactly (sorted content, $nco lines)"
+}
+
+compare_sorted kmer --kmer -k "$K"
+compare_sorted mem  --mem
+
+echo "[regression] all coroutine-vs-sequential checks passed (PML, k-mer, MEM)"
