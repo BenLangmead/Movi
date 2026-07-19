@@ -44,7 +44,9 @@ bool MoveStructure::query_mem_bml(MoveQuery& mq, int32_t& pos_on_r, int32_t& min
     if (ftab_skip) {
         // If BML skip is known from ftab, find next left end with only backward extension (extend_left slow without ftab)
         MoveInterval fw_interval = bi_interval.fw_interval;
-        for (size_t j = 0; j <= init_pos - pos_on_r; ++j) {
+        // Signed counter: the bound goes negative when the ftab covers the whole seed,
+        // and a size_t one would wrap and loop forever.
+        for (int32_t j = 0; j <= init_pos - pos_on_r; ++j) {
             if (!backward_search_step(query_seq[init_pos - j], fw_interval)) {
                 pos_on_r = init_pos - j + 1;
                 return false;
@@ -55,8 +57,9 @@ bool MoveStructure::query_mem_bml(MoveQuery& mq, int32_t& pos_on_r, int32_t& min
         throw std::runtime_error("Extended past failed ftab");
     }
     else {
-        // Backward extension to find if left end permits a sufficiently long MEM, should equal pos_on_r if true
-        for (size_t j = 0; j <= init_pos - pos_on_r; ++j) {
+        // Backward extension to find if left end permits a sufficiently long MEM, should equal pos_on_r if true.
+        // Signed counter, same reason as above.
+        for (int32_t j = 0; j <= init_pos - pos_on_r; ++j) {
             if (!extend_left(query_seq[init_pos - j], bi_interval)) {
                 pos_on_r = init_pos - j + 1;
                 return false;
@@ -90,7 +93,8 @@ bool MoveStructure::query_mem_bml(MoveQuery& mq, int32_t& pos_on_r, int32_t& min
         MoveInterval fw_interval = initialize_backward_search(mq, init_pos, match_len);
         ++match_len; // TODO: this is still off by one for initialize_backward_search
         --init_pos; // Move to next character left of ftab k-mer or character left of initial range if ftab fails
-        for (i = 0; i <= init_pos - (pos_on_r + 1); ++i) {
+        // Signed comparison, same reason as above.
+        for (i = 0; static_cast<int32_t>(i) <= init_pos - (pos_on_r + 1); ++i) {
             if (!backward_search_step(query_seq[init_pos - i], fw_interval)) {
                 break;
             }
