@@ -191,6 +191,25 @@ else
 fi
 ((TOTAL_TESTS++))
 
+# Coroutine PML across threshold modes (differential: movi query --pml --coroutine vs
+# sequential in regular-, sampled-, and blocked-thresholds). Serializes each mode's
+# index from a checked-in, mode-independent precursor set (no pfp/grlBWT needed), then
+# checks coroutine PMLs match the sequential path exactly. Guards the mode-portability
+# of the coroutine PML body.
+print_status "Running coroutine PML mode-portability regression..."
+echo "----------------------------------------"
+if bash "$PROJECT_ROOT/tests/regression_coroutine_pml_modes.sh" "$(pwd)"; then
+    echo "----------------------------------------"
+    print_success "coroutine PML mode-portability regression passed"
+    echo ""
+else
+    echo "----------------------------------------"
+    print_error "coroutine PML mode-portability regression failed"
+    echo ""
+    ((FAILED_TESTS++))
+fi
+((TOTAL_TESTS++))
+
 # Re-enable exit on error
 set -e
 
