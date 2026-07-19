@@ -107,6 +107,29 @@ The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id 
   **`--kmer-count --kmer-bv` when k is known and queried repeatedly**, and **plain
   `--kmer-count` when k varies or is not known ahead of time**: the latter is the
   k-independent path, one index answering every k with no per-k build or storage.
+- **Which PML style to use: the coroutine, at every read length.** Measured on one
+  exclusive node (hprc94, 35 GB index; the same 25 M bases re-cut into fixed-length reads
+  so only read length varies; load-excluded, one thread, 5 reps, medians, CV <= 0.01 on
+  warm cells):
+
+  | read length | (a) sequential | (b) strand | (c) coroutine | winner |
+  |---|---|---|---|---|
+  | 150 bp | 14.18 | 21.15 | **25.13** | coroutine |
+  | 500 bp | 15.80 | 25.28 | **30.12** | coroutine |
+  | 2500 bp | 17.05 | 27.56 | **32.36** | coroutine |
+  | 13000 bp (HiFi) | 17.18 | 28.60 | **32.47** | coroutine |
+
+  *(M bases/s.)* The coroutine leads everywhere, by 1.13x to 1.19x over the strand
+  scheduler and 1.77x to 1.90x over sequential, with byte-identical output (verified
+  against the sequential path on the 13 kb reads at this scale). Both latency-hiding
+  styles pull away from sequential as reads lengthen, which is what the memory-latency
+  argument predicts: longer reads mean longer LF chains and more latency to hide.
+
+  Earlier profiling reported a read-length **crossover**, with the strand scheduler
+  overtaking the coroutine on 13 kb HiFi. That no longer holds. The strand and sequential
+  figures here reproduce the earlier ones closely (28.60 vs ~28.3, 17.18 vs ~17.8), but
+  the coroutine roughly doubled -- ~16.5 then, 32.47 now -- so it now leads at 13 kb
+  rather than trailing. Treat any "strand wins on HiFi" guidance as superseded.
 - The coroutine PML body is an inline reimplementation of the PML loop; the MEM and
   k-mer coroutines instead reuse the shared search primitives.
 - The manual-strand path (b) is deliberately **one shared scheduler**, not per-query
