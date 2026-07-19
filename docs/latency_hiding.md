@@ -22,7 +22,7 @@ entries) are worth hiding; sequential run scans are left to the hardware prefetc
 | Style | Files |
 |-------|-------|
 | (a) sequential | `query_pml.cpp` (`query_pml`), `query_zml.cpp` (`query_zml`), `query_kmer.cpp` (`query_all_kmers`, `query_kmers_from`), `query_kmer_bv.cpp` (`query_kmers_count_bv`, `query_kmers_id_bv`), `query_mem.cpp` (`query_mems`, `query_mem_bml`); shared repositioning primitives in `move_structure_query.cpp` (`reposition_thresholds`, `reposition_randomly`, `handle_reposition_*`, `reposition_up/down`), search primitives in `move_structure_search.cpp` (`backward_search`, `extend_bidirectional`, `*_search_step`), and `move_structure.cpp` (`LF_move`, `fast_forward`) |
-| (b) manual strands | `read_processor.cpp` (`process_latency_hiding`, `kmer_search_latency_hiding`); `struct Strand` in `read_processor.hpp` |
+| (b) manual strands | `read_processor.cpp` (`process_latency_hiding`); `struct Strand` in `read_processor.hpp`. Serves PML, ZML and whole-read exact-count only |
 | (c) coroutines | `coroutine_processor.cpp` (the `query_*_coroutine` bodies + scheduler + `run_coroutine_query`; guarded to the threshold index modes, `(MODE==6 \|\| MODE==7 \|\| MODE==8) && COLOR_MODE==0`, i.e. regular-, sampled-, and blocked-thresholds). The bodies use the mode-portable move-structure primitives (`get_c`/`get_id`/`reposition_thresholds`/`get_n`/`get_offset`) throughout. Reached via **`movi query --coroutine`** (dispatch in `movi.cpp` `query()`), which routes PML, MEM, plain k-mer presence, plain k-mer count, and count-bv through the coroutine — all byte-identical to the sequential path. |
 
 The k-mer-bitvector add-ons (SSHash-style MPHF IDs and the run-local exact count)
@@ -40,7 +40,7 @@ bv queries (`query_kmers_count_bv`, `query_kmers_id_bv`). The small
 | Exact match (whole-read count) | `handle_count` → `backward_search(...).count()` | `process_latency_hiding` | N/A |
 | ZML | `query_zml` | `process_latency_hiding` | N/A |
 | PML | `query_pml` | `process_latency_hiding` | `query_pml_coroutine` |
-| k-mer presence | `query_all_kmers`/`query_kmers_from` | `kmer_search_latency_hiding` (disabled by default) | `query_kmer_coroutine` |
+| k-mer presence | `query_all_kmers`/`query_kmers_from` | N/A | `query_kmer_coroutine` |
 | k-mer count (no bitvectors) | `query_all_kmers` count branch → `MoveInterval::count()` | N/A | `query_kmer_coroutine` (count mode) |
 | k-mer count (bitvector) | `query_kmers_count_bv` → `kmer_count_from_bv` (`--kmer-count --kmer-bv`) | N/A | `query_kmer_coroutine` (`--kmer-bv`) |
 | MEMs | `query_mems`/`query_mem_bml` → `extend_bidirectional` | N/A | `query_mem_coroutine` |
@@ -59,6 +59,10 @@ The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id 
 
 - MEM has no manual-strand path; its coroutine version is correct but compute-bound
   (the per-run scans dominate, so there is little latency to hide).
+- **k-mer has no manual-strand path either.** Latency hiding for k-mer queries is the
+  coroutine path, which is byte-identical to the sequential one. The strand scheduler
+  serves PML, ZML and exact-count; a k-mer query always takes the sequential path (the
+  k-mer flags turn prefetching off in the parser) unless `--coroutine` is given.
 - **ftab auto-selection (MEM and k-mer):** the ftab accelerates both MEM and k-mer
   queries (it only accelerates -- results are ftab-independent), and the deepest
   applicable ftab is fastest. When `--ftab-k` is not given, `movi query` auto-selects the

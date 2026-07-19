@@ -411,17 +411,15 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                     break;
                 }
 
-                if (movi_options.is_pml() or movi_options.is_zml() or movi_options.is_count()) {
-
-
+                // The strand scheduler serves PML, ZML and whole-read exact-count. k-mer
+                // and MEM are not routed here: the k-mer query flags turn prefetching off
+                // in the parser, so a k-mer query reaches the sequential path below, and
+                // its latency-hiding variant is the coroutine one dispatched above.
 #if TALLY_MODES
-                    rp.process_latency_hiding_tally(reader);
+                rp.process_latency_hiding_tally(reader);
 #else
-                    rp.process_latency_hiding(reader);
+                rp.process_latency_hiding(reader);
 #endif
-                } else if (movi_options.is_kmer()) {
-                    rp.kmer_search_latency_hiding(movi_options.get_k(), reader);
-                }
             }
         }
 
@@ -433,7 +431,9 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
 
     } else {
         if (!movi_options.is_kmer()) {
-            // For kmer queries, latency hiding is disabled by default.
+            // k-mer queries always arrive here (the parser turns prefetching off for
+            // them), so the message would be noise; it is meant for a query that could
+            // have used the strand scheduler but was asked not to.
             INFO_MSG("Latency hiding is disabled...");
         }
 

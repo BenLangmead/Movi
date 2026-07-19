@@ -13,12 +13,6 @@ ReadProcessor::ReadProcessor(MoveStructure& mv_, int strands_, bool verbose_, bo
     verbose = verbose_;
     reverse = mv_.movi_options->is_reverse();
 
-    total_kmer_count = 0;
-    positive_kmer_count = 0;
-    negative_kmer_count = 0;
-    kmer_extension_count = 0;
-    kmer_extension_stopped_count = 0;
-    negative_kmer_extension_count = 0;
     read_processed = 0;
     strands = strands_;
     total_ff_count = 0;
@@ -867,20 +861,9 @@ uint64_t ReadProcessor::initialize_strands(std::vector<Strand>& processes, Batch
 
     for (uint64_t i = 0; i < strands; i++) {
         if (finished_count == 0) {
-            if (mv.movi_options->is_kmer()) {
-                reset_kmer_search(processes[i], reader);
-                if (!processes[i].finished) {
-                    next_kmer_search(processes[i]);
-                }
-            } else {
-                reset_process(processes[i], reader);
-                if (!processes[i].finished)
-                    reset_backward_search(processes[i]);
-                /* if (mv.movi_options->is_zml()) {
-                    processes[i].kmer_end = processes[i].pos_on_r;
-                    //processes[i].match_len = 0;
-                } */
-            }
+            reset_process(processes[i], reader);
+            if (!processes[i].finished)
+                reset_backward_search(processes[i]);
         } else {
             processes[i].finished = true;
         }
@@ -891,109 +874,6 @@ uint64_t ReadProcessor::initialize_strands(std::vector<Strand>& processes, Batch
     }
 
     return finished_count;
-}
-
-void ReadProcessor::kmer_search_latency_hiding(uint32_t k_, BatchLoader& reader) {
-    k = k_;
-
-    std::vector<Strand> processes;
-    uint64_t finished_count = initialize_strands(processes, reader);
-    if (mv.movi_options->is_debug()) {
-        INFO_MSG(std::to_string(strands) + " processes are initiated.");
-    }
-
-    uint64_t total_bs = 0;
-    // Assuming all the reads > k
-    while (finished_count != strands) {
-        for (uint64_t i = 0; i < strands; i++) {
-            if (!processes[i].finished) {
-                // 1: process next character
-                bool backward_search_finished = backward_search(processes[i], processes[i].kmer_end);
-                total_bs += 1;
-                if (mv.movi_options->is_debug())
-                    DEBUG_MSG(backward_search_finished + " " + std::to_string(processes[i].kmer_start) + " "
-                              + std::to_string(processes[i].kmer_end) + " " + std::to_string(processes[i].pos_on_r));
-                // if ((processes[i].pos_on_r == processes[i].kmer_start and processes[i].kmer_start != 0) or (processes[i].pos_on_r == -1 and processes[i].kmer_start == 0)) {
-                if (processes[i].pos_on_r == processes[i].kmer_start - 1) {
-                    // 2: if the kmer is found
-                    if (mv.movi_options->is_debug())
-                        DEBUG_MSG(std::to_string(processes[i].pos_on_r) + " " + std::to_string(processes[i].kmer_start));
-                        /*if (!verify_kmer(processes[i], k)) {
-                            std::cerr << "kmer not verified!\n";
-                            exit(0);
-                        }*/
-                    if (mv.movi_options->is_debug())
-                        DEBUG_MSG("+ ");
-                    if (processes[i].kmer_start >= 0) {
-                        positive_kmer_count += 1;
-                        if (processes[i].kmer_extension)
-                            kmer_extension_count += 1;
-                        else
-                            processes[i].kmer_extension = true;
-                        processes[i].kmer_end -= 1;
-                        processes[i].kmer_start -= 1;
-                        if (processes[i].kmer_start >= 0)
-                            total_kmer_count += 1;
-                        /////next_kmer_search(processes[i]);
-                    } else {
-                        reset_kmer_search(processes[i], reader);
-                        next_kmer_search(processes[i]);
-                        // 3: -- check if it was the last read in the file -> finished_count++
-                        if (processes[i].finished) {
-                            finished_count += 1;
-                        }
-                    }
-                } else if (backward_search_finished and processes[i].kmer_extension) {
-                    // 2: if the kmer was not found during an extension
-                    if (processes[i].kmer_start >= 0)
-                        total_kmer_count -= 1;
-                    kmer_extension_stopped_count += 1;
-                    processes[i].kmer_end += 1;
-                    processes[i].kmer_start += 1;
-                    /////////processes[i].pos_on_r = processes[i].kmer_end;
-                    next_kmer_search(processes[i]);
-                } else if (backward_search_finished) {
-                    // 2: if the kmer was not found not during an extension
-                    negative_kmer_count += 1;
-                    if (processes[i].kmer_start >= 0) {
-                        next_kmer_search(processes[i]);
-                        // next_kmer_search_negative_skip_all_heuristic(processes[i], k);
-                        if (processes[i].finished) {
-                            finished_count += 1;
-                        }
-                    } else {
-                        reset_kmer_search(processes[i], reader);
-                        next_kmer_search(processes[i]);
-                        // 3: -- check if it was the last read in the file -> finished_count++
-                        if (processes[i].finished) {
-                            finished_count += 1;
-                        }
-                    }
-                } else if (processes[i].kmer_start < 0) {
-                    if (mv.movi_options->is_debug())
-                        DEBUG_MSG("- ");
-                    reset_kmer_search(processes[i], reader);
-                    next_kmer_search(processes[i]);
-                    // 3: -- check if it was the last read in the file -> finished_count++
-                    if (processes[i].finished) {
-                        finished_count += 1;
-                    }
-                } else {
-                    // 4: big jump with prefetch
-                    my_prefetch_r((void*)(&(mv.rlbwt[0]) + mv.get_id(processes[i].range.run_start)));
-                    my_prefetch_r((void*)(&(mv.rlbwt[0]) + mv.get_id(processes[i].range.run_end)));
-                }
-            }
-        }
-    }
-
-    INFO_MSG("total_bs: " + std::to_string(total_bs));
-    INFO_MSG("positive_kmer_count: " + std::to_string(positive_kmer_count));
-    INFO_MSG("negative_kmer_count: " + std::to_string(negative_kmer_count));
-    INFO_MSG("total_kmer_count: " + std::to_string(total_kmer_count));
-    INFO_MSG("kmer_extension_stopped_count: " + std::to_string(kmer_extension_stopped_count));
-    INFO_MSG("kmer_extension_count: " + std::to_string(kmer_extension_count));
-    INFO_MSG("negative_kmer_extension_count: " + std::to_string(negative_kmer_extension_count));
 }
 
 void ReadProcessor::reset_backward_search(Strand& process) {
@@ -1026,78 +906,6 @@ void ReadProcessor::reset_backward_search(Strand& process) {
     process.range = mv.initialize_backward_search(process.mq, process.pos_on_r, process.match_len);
     process.kmer_end = process.pos_on_r;
     // Very expensive operation: process.match_count = process.range.count(mv.rlbwt);
-}
-
-void ReadProcessor::reset_kmer_search(Strand& process, BatchLoader& reader) {
-    process.finished = next_read(process, reader);
-    if (!process.finished) {
-        process.length_processed = 0;
-        process.kmer_start = process.mq.query().length() - k + 1;
-        process.kmer_end = process.mq.query().length() - 1 + 1;
-        process.pos_on_r = process.kmer_end;
-
-        // Find the first position where the character is legal
-        while (!mv.check_alphabet(process.mq.query()[process.pos_on_r])) {
-            process.pos_on_r -= 1;
-        }
-    }
-}
-
-void ReadProcessor::next_kmer_search_negative_skip_all_heuristic(Strand& process, BatchLoader& reader) {
-    process.kmer_extension = false;
-    std::string& R = process.mq.query();
-    process.kmer_start = process.pos_on_r - k;
-    if (process.kmer_start >= 0) {
-        total_kmer_count += (process.kmer_end - process.pos_on_r + 1);
-        negative_kmer_count += (process.kmer_end - process.pos_on_r);
-        negative_kmer_extension_count += (process.kmer_end - process.pos_on_r);
-        process.kmer_end = process.pos_on_r - 1;
-        process.pos_on_r = process.kmer_end;
-        process.match_len = 0;
-        process.range.run_start = mv.first_runs[mv.alphamap[R[process.pos_on_r]] + 1];
-        process.range.offset_start = mv.first_offsets[mv.alphamap[R[process.pos_on_r]] + 1];
-        process.range.run_end = mv.last_runs[mv.alphamap[R[process.pos_on_r]] + 1];
-        process.range.offset_end = mv.last_offsets[mv.alphamap[R[process.pos_on_r]] + 1];
-    } else {
-        total_kmer_count += (process.kmer_end - k + 1);
-        negative_kmer_count += (process.kmer_end - k + 1);
-        negative_kmer_extension_count += (process.kmer_end - k + 1);
-        reset_kmer_search(process, reader);
-        next_kmer_search(process);
-    }
-}
-
-void ReadProcessor::next_kmer_search(Strand& process) {
-    process.kmer_extension = false;
-    std::string& R = process.mq.query();
-    process.kmer_start -=1;
-    if (process.kmer_start >= 0)
-        total_kmer_count += 1;
-    process.kmer_end -=1;
-    process.pos_on_r = process.kmer_end;
-    process.match_len = 0;
-    process.range.run_start = mv.first_runs[mv.alphamap[R[process.pos_on_r]] + 1];
-    process.range.offset_start = mv.first_offsets[mv.alphamap[R[process.pos_on_r]] + 1];
-    process.range.run_end = mv.last_runs[mv.alphamap[R[process.pos_on_r]] + 1];
-    process.range.offset_end = mv.last_offsets[mv.alphamap[R[process.pos_on_r]] + 1];
-}
-
-bool ReadProcessor::verify_kmer(Strand& process, uint64_t k) {
-    std::string& R = process.mq.query();
-    std::string kmer = R.substr (process.kmer_start, k);
-    int32_t pos_on_r = k - 1;
-    MoveInterval interval(
-        mv.first_runs[mv.alphamap[kmer[pos_on_r]] + 1],
-        mv.first_offsets[mv.alphamap[kmer[pos_on_r]] + 1],
-        mv.last_runs[mv.alphamap[kmer[pos_on_r]] + 1],
-        mv.last_offsets[mv.alphamap[kmer[pos_on_r]] + 1]
-    );
-    auto match_count = mv.backward_search(kmer, pos_on_r, interval, std::numeric_limits<int32_t>::max()).count(mv.rlbwt);
-    if (pos_on_r == 0 and match_count > 0) {
-        return true;
-    } else {
-        return false;
-    }
 }
 
 bool ReadProcessor::backward_search(Strand& process, uint64_t end_pos) {
