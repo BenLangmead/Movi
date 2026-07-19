@@ -65,9 +65,10 @@ using std::chrono::steady_clock;
 using std::chrono::duration_cast;
 using std::chrono::duration;
 
-// Coroutine latency hiding targets the regular-thresholds (mode 6, non-color)
-// index only, matching the movi-co binary. Under any other MODE/COLOR_MODE this
-// translation unit compiles to nothing, so it is safe in the shared MOVI_SOURCES.
+// Coroutine latency hiding is only implemented for the regular-thresholds index
+// (mode 6, non-color). Under any other MODE/COLOR_MODE this translation unit
+// compiles to nothing, so it is safe to keep in the shared MOVI_SOURCES; the
+// `movi query --coroutine` dispatch in movi.cpp is guarded by the same condition.
 #if MODE == 6 && COLOR_MODE == 0
 
 // The only cross-cutting global the query bodies need: the debug flag read by the
@@ -336,10 +337,10 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
         int read_bases = read_data.sequence.length();
         total_bases += read_bases;
         
-        // Process the read in place, WITHOUT reversing it: sequential query_pml
-        // walks the read right-to-left (pos from length-1 down to 0) directly, so
-        // the coroutine does the same and produces the SAME forward-read PMLs --
-        // not the reversed-read PMLs the old movi-co convention emitted.
+        // Process the read in place, without reversing it: query_pml walks the read
+        // right-to-left (pos from length-1 down to 0), producing forward-read PMLs.
+        // Reversing the read would instead produce the reversed-read PMLs (the
+        // `--pml --reverse` result), which is a different query.
         std::string& R = read_data.sequence;
         matching_lens.clear();
         int32_t roff = R.length() - 1;    // offset in read
@@ -946,9 +947,9 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
 }
 
 
-// The standalone-loader run_coroutine_query(fastq, index_dir, ...) overload was
-// removed together with the movi-co binary; movi.cpp's query() dispatch calls the
-// MoveStructure& core overload below directly, on its already-deserialized index.
+// Entry point for the engine: movi.cpp's query() dispatch calls this on an
+// already-deserialized index. The engine does not own index construction -- the
+// caller loads the index and sets up ftab/kmerbv before handing it over here.
 void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concurrency,
                          const CoroutineQueryOptions& opts, std::ostream& out) {
     init_buffered_io();

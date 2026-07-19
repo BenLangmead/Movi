@@ -4,8 +4,6 @@
 #include "move_structure.hpp"
 #include "utils.hpp"
 
-std::ostringstream dbg;
-
 // IMPORTANT: The index has to be built on a reference with separators to get the correct kmer counts
 // IMPORTANT: For the bidirectional search, also the index has to be built with the separators
 
@@ -56,6 +54,7 @@ uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool 
             if (interval_out) *interval_out = backward_search_result;
 
             if (movi_options->is_debug()) {
+                std::ostringstream dbg;
                 int32_t pos_on_r_ = pos_on_r_saved;
                 auto backward_search_result_one_extra_base = backward_search(query_seq, pos_on_r_, initial_interval, k - match_len - 1);
                 dbg << backward_search_result.count(rlbwt) << "----" <<  backward_search_result_one_extra_base.count(rlbwt) << "\n";
