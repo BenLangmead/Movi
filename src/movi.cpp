@@ -243,6 +243,33 @@ void color(MoveStructure& mv_, MoviOptions& movi_options) {
 
 void query(MoveStructure& mv_, MoviOptions& movi_options) {
 
+    // MEM search is accelerated by the ftab, and a deeper ftab means fewer (and
+    // cheaper) bidirectional extend steps. The ftab only accelerates; MEM results are
+    // ftab-independent.
+    // So when the user runs `movi query --mem` without an explicit --ftab-k, auto-select
+    // the deepest ftab.<k>.bin present in the index, giving fast MEM by default without
+    // the user needing to know which ftab depths were built.
+    if (movi_options.is_mem() && movi_options.get_ftab_k() == 0) {
+        uint32_t best = 0;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(movi_options.get_index_dir(), ec)) {
+            const std::string name = entry.path().filename().string();
+            // Match "ftab.<k>.bin" with a numeric k (skip e.g. ftab.chosen.k).
+            if (name.rfind("ftab.", 0) == 0 && name.size() > 9 &&
+                name.compare(name.size() - 4, 4, ".bin") == 0) {
+                const std::string kstr = name.substr(5, name.size() - 9);
+                if (!kstr.empty() && std::all_of(kstr.begin(), kstr.end(), ::isdigit)) {
+                    uint32_t k = static_cast<uint32_t>(std::stoul(kstr));
+                    if (k > best) best = k;
+                }
+            }
+        }
+        if (best > 1) {
+            movi_options.set_ftab_k(best);
+            INFO_MSG("MEM: auto-selected the deepest available ftab (ftab-k=" + std::to_string(best) + ").");
+        }
+    }
+
     if (movi_options.get_ftab_k() != 0) {
         mv_.read_ftab();
         INFO_MSG("Ftab was read!");
@@ -261,7 +288,7 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
             WARNING_MSG("MEM finding does not support prefetching. Continuing with prefetching disabled.");
         }
         if (movi_options.get_ftab_k() == 0) {
-            throw std::runtime_error(ERROR_MSG("MEM finding requires ftab. Please build the ftab using the ./movi ftab --ftab-k <k>, then pass --ftab-k <k> to the query step."));
+            throw std::runtime_error(ERROR_MSG("MEM finding requires an ftab, but none was found in the index. Build one with `movi ftab --ftab-k 12` (a deeper ftab means faster MEM search; ftab-12 is recommended). It is then auto-selected, or pass --ftab-k <k> explicitly."));
         } else {
             if (movi_options.get_min_mem_length() > movi_options.get_ftab_k()) {
                 WARNING_MSG("Setting minimum MEM (length " + std::to_string(movi_options.get_min_mem_length()) + ") greater than ftab k (" + std::to_string(movi_options.get_ftab_k()) + ") causes a slower MEM search.");

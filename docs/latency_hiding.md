@@ -59,6 +59,14 @@ The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id 
 
 - MEM has no manual-strand path; its coroutine version is correct but compute-bound
   (the per-run scans dominate, so there is little latency to hide).
+- **MEM speed / ftab:** MEM search is accelerated by the ftab, and a deeper ftab means
+  fewer and cheaper bidirectional `extend_bidirectional` steps. `movi query --mem`
+  auto-selects the deepest `ftab.<k>.bin` present in the index when `--ftab-k` is not
+  given, so build an ftab-12 (`movi ftab --ftab-k 12`) for the best MEM throughput.
+  With ftab-12 the length-thresholded (BML, `--min-mem-length` above ~1) MEM query is
+  within ~5.5x of k-mer at HPRC scale and faster than k-mer at E. coli scale. The one
+  slow case is all-MEM enumeration (`--min-mem-length 1`, `query_all_mems`), where the
+  `O(#runs)` skip-count + rc-walk scan explodes on large, highly-repeated intervals.
 - The coroutine PML body is an inline reimplementation of the PML loop; the MEM and
   k-mer coroutines instead reuse the shared search primitives.
 - The manual-strand path (b) is deliberately **one shared scheduler**, not per-query
