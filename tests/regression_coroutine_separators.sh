@@ -95,38 +95,44 @@ if not shared or unmatched or bad:
 print("PASS: coroutine PML matches sequential exactly on the separator index (%d reads)"%len(shared))
 PY
 
-# The fold routes MEM and plain k-mer presence through the coroutine too (movi.cpp
+# MEM and plain k-mer presence are also routed through the coroutine (movi.cpp
 # dispatch), both via the shared output_mems / output_kmers emitters. Their per-read
-# content must be byte-identical to the sequential path. The emit ORDER can differ
-# (reorder-buffer input order vs sequential batch order), so compare the SORTED line
-# multiset -- the project's order-independent "byte-identical content" standard.
-compare_sorted () {  # $1=label  $2...=query flags (without --coroutine/--stdout/-t/-s)
-  local label="$1"; shift
-  echo "[regression] [$label] running coroutine vs sequential ..."
-  "$MV" query --index "$IDX" --read "$READS" "$@" --coroutine --stdout -s 8 -t 1 > "$WORK/$label.co"  2>/dev/null
-  "$MV" query --index "$IDX" --read "$READS" "$@"             --stdout       -t 1 > "$WORK/$label.seq" 2>/dev/null
-  sort "$WORK/$label.co"  > "$WORK/$label.co.sorted"
-  sort "$WORK/$label.seq" > "$WORK/$label.seq.sorted"
+# content must be byte-identical to the sequential path. These are compared in file
+# mode (-o), not --stdout: the sequential --stdout path appends a trailing run-summary
+# stats block (total_kmers/backward_search_*/...) that the coroutine does not emit, and
+# which would otherwise show up as spurious "extra lines"; the -o output files hold only
+# the per-read records. The emit order can still differ (reorder-buffer input order vs
+# sequential batch order), so compare the sorted line multiset -- the project's
+# order-independent "byte-identical content" standard.
+compare_file_mode () {  # $1=label  $2=output-file suffix  $3...=query flags (no --coroutine/-o/-t/-s)
+  local label="$1" suf="$2"; shift 2
+  echo "[regression] [$label] running coroutine vs sequential (file mode) ..."
+  "$MV" query --index "$IDX" --read "$READS" "$@" --coroutine -s 8 -t 1 -o "$WORK/$label.co"  >/dev/null 2>&1
+  "$MV" query --index "$IDX" --read "$READS" "$@"             -t 1 -o "$WORK/$label.seq" >/dev/null 2>&1
+  local cof="$WORK/$label.co$suf" sef="$WORK/$label.seq$suf"
+  [ -f "$cof" ] || { echo "FAIL: coroutine $label produced no output file ($cof)"; exit 1; }
+  [ -f "$sef" ] || { echo "FAIL: sequential $label produced no output file ($sef)"; exit 1; }
+  sort "$cof" > "$cof.sorted"; sort "$sef" > "$sef.sorted"
   local nco nseq
-  nco=$(wc -l < "$WORK/$label.co.sorted"); nseq=$(wc -l < "$WORK/$label.seq.sorted")
-  echo "  lines: coroutine=$nco sequential=$nseq"
-  if ! diff -q "$WORK/$label.co.sorted" "$WORK/$label.seq.sorted" >/dev/null; then
+  nco=$(wc -l < "$cof.sorted"); nseq=$(wc -l < "$sef.sorted")
+  echo "  records: coroutine=$nco sequential=$nseq"
+  if ! diff -q "$cof.sorted" "$sef.sorted" >/dev/null; then
     echo "FAIL: coroutine $label diverges from sequential on a separator index"
-    diff "$WORK/$label.co.sorted" "$WORK/$label.seq.sorted" | head -10
+    diff "$cof.sorted" "$sef.sorted" | head -10
     exit 1
   fi
   [ "$nco" -gt 0 ] || { echo "FAIL: coroutine $label produced no output"; exit 1; }
-  echo "PASS: coroutine $label matches sequential exactly (sorted content, $nco lines)"
+  echo "PASS: coroutine $label matches sequential exactly (file content, $nco records)"
 }
 
-compare_sorted kmer --kmer -k "$K"
-compare_sorted mem  --mem
+compare_file_mode kmer ".kmers.$K" --kmer -k "$K"
+compare_file_mode mem  ".mems"     --mem --ftab-k 10 --min-mem-length 25
 
 # Scope note: this test covers the coroutine queries that run on a plain
-# regular-thresholds --separators index (PML, k-mer presence, MEM) in --stdout mode.
-# The remaining routed coroutine query, bitvector count (--kmer-count --kmer-bv),
-# needs a kmer-bv index (movi build-kmerbv, with the per-k B_k/C_k structures) that
-# this lightweight test does not build; its coroutine-vs-sequential equivalence, plus
-# file-mode (-o) byte-identity, are validated by the cluster byte-gate baseline.
+# regular-thresholds --separators index (PML, k-mer presence, MEM). The remaining
+# routed coroutine query, bitvector count (--kmer-count --kmer-bv), needs a kmer-bv
+# index (movi build-kmerbv, with the per-k B_k/C_k structures) that this lightweight
+# test does not build; its coroutine-vs-sequential equivalence is validated by the
+# cluster byte-gate baseline.
 
 echo "[regression] all coroutine-vs-sequential checks passed (PML, k-mer, MEM)"
