@@ -383,7 +383,8 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                                : movi_options.is_kmer() ? output_files.kmer_file
                                                         : output_files.mls_file;
             run_coroutine_query(mv_, movi_options.get_read_file(),
-                                static_cast<int>(movi_options.get_strands()), copts,
+                                static_cast<int>(movi_options.get_strands()),
+                                static_cast<int>(movi_options.get_threads()), copts,
                                 movi_options.write_stdout_enabled() ? std::cout : dest);
             close_output_files(movi_options, output_files);
             return;

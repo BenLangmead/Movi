@@ -26,5 +26,11 @@ struct CoroutineQueryOptions {
 // calls this from its `movi query --coroutine` dispatch. Default query mode (no
 // mem_query/kmer_query set) is PML. `out` is the output destination (a file stream
 // from output_files, or std::cout).
+//
+// `concurrency` is the per-thread in-flight coroutine count (latency hiding within a
+// thread); `nthreads` is the number of worker threads (cores). They are independent:
+// total in-flight coroutines = nthreads * concurrency. nthreads == 1 runs the original
+// single-threaded path with no locking overhead.
 void run_coroutine_query(MoveStructure& mv, const std::string& fastq_file,
-                         int concurrency, const CoroutineQueryOptions& opts, std::ostream& out);
+                         int concurrency, int nthreads,
+                         const CoroutineQueryOptions& opts, std::ostream& out);

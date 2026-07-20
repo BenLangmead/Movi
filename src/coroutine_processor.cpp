@@ -39,6 +39,8 @@
 #include <algorithm>
 #include <variant>
 #include <stdexcept>
+#include <atomic>
+#include <omp.h>
 #include <mutex>
 #include <cstring>
 #include <map>
@@ -111,6 +113,8 @@ static void init_buffered_io() {
 struct OrderedEmitter {
     uint64_t next_emit = 0;
     bool ordered = false;         // when true, buffer + write in input order; else completion order
+    bool threaded = false;        // when true, guard emit() with the mutex (many worker threads)
+    std::mutex mu;                // serializes emit()/finish() across worker threads
     std::map<uint64_t, std::string> pending;  // completed lines awaiting their turn
     // Output destination, set per run by run_coroutine_query to the appropriate
     // output_files stream (or std::cout for --stdout) so coroutine output lands in
@@ -122,8 +126,18 @@ struct OrderedEmitter {
     }
     // Emit the line for read 'seq'. Writes immediately if it is the next read in
     // input order, then drains any consecutive buffered lines; otherwise buffers
-    // a copy until the earlier reads complete.
+    // a copy until the earlier reads complete. When more than one worker thread is
+    // running the body is taken under the mutex; a single-thread run skips the lock
+    // entirely, so the sequential fast path pays no locking overhead.
     void emit(uint64_t seq, const std::string& line) {
+        if (threaded) {
+            std::lock_guard<std::mutex> lk(mu);
+            emit_body(seq, line);
+        } else {
+            emit_body(seq, line);
+        }
+    }
+    void emit_body(uint64_t seq, const std::string& line) {
         if (!ordered) { write_line(line); return; }  // completion order (reorder disabled)
         if (seq == next_emit) {
             write_line(line);
@@ -143,54 +157,55 @@ struct OrderedEmitter {
         for (auto& kv : pending) write_line(kv.second);
         pending.clear();
         out->flush();
+        next_emit = 0;  // reset for any subsequent run reusing this static emitter
     }
 };
 static OrderedEmitter g_emitter;
 
-// Shared reader that parses FASTQ/A records in batches and hands them to
-// coroutines through per-coroutine slots. The hot path neither parses one
-// record at a time nor copies each read: the scheduler moves a record from the
-// current batch into the awaiting coroutine's slot, and the coroutine uses it
-// in place (zero per-read copy). Single-threaded -- no background I/O thread --
-// so the query still runs on exactly one CPU.
-class SharedFastqReader {
-public:
-    struct ReadData {
-        bool valid = false;
-        string name;
-        string sequence;
-        uint64_t seq = 0;          // input-order index, assigned when served
-    };
+// One parsed FASTQ/A record. `seq` is the global input-order index, assigned by
+// FastqSource under its lock so it is gap-free and monotonic across every worker
+// thread -- which is what lets the OrderedEmitter reassemble input order.
+struct CoReadData {
+    bool valid = false;
+    string name;
+    string sequence;
+    uint64_t seq = 0;
+};
 
-private:
+// The single shared input for a run. Owns the kseq parser and the global read
+// counter, and hands out whole batches so the per-read handoff stays off the lock.
+// One instance per run, shared by every worker thread; the lock is engaged only
+// when more than one thread is running, so a single-thread run pays nothing beyond
+// a batch refill every BATCH_N reads (as before).
+class FastqSource {
     gzFile fp;
     kseq_t* seq;
-    std::vector<ReadData> batch;   // current batch of parsed records
-    size_t batch_pos = 0;          // next unserved record within batch
-    std::vector<ReadData> slots;   // one slot per coroutine (zero-copy handoff)
+    std::mutex mu;
+    bool threaded;
     uint64_t served_ = 0;          // monotonic read index, for in-order output
     static constexpr size_t BATCH_N = 256;
 
-    // Parse up to BATCH_N records in a tight loop. This amortizes the kseq
-    // parse / gzip-decompression call overhead and keeps it off the per-read
-    // critical path (one refill stall every BATCH_N reads instead of a parse
-    // interleaved with every read's compute).
-    void refill() {
-        batch.clear();
-        batch_pos = 0;
+    // Parse up to BATCH_N records into `out` (cleared first), tagging each with the
+    // next global input-order index. Amortizes the kseq parse / gzip-decompression
+    // call overhead: one refill every BATCH_N reads, not a parse per read.
+    size_t fill(std::vector<CoReadData>& out) {
+        out.clear();
         for (size_t k = 0; k < BATCH_N; k++) {
             int l = kseq_read(seq);
             if (l < 0) break;  // EOF (-1) or error (-2/-3)
-            ReadData rd;
+            CoReadData rd;
             rd.valid = true;
             rd.name.assign(seq->name.s, seq->name.l);
             rd.sequence.assign(seq->seq.s, seq->seq.l);
-            batch.push_back(std::move(rd));
+            rd.seq = served_++;
+            out.push_back(std::move(rd));
         }
+        return out.size();
     }
 
 public:
-    SharedFastqReader(const string& fastq_file, int concurrency) : fp(nullptr), seq(nullptr) {
+    FastqSource(const string& fastq_file, bool threaded_)
+        : fp(nullptr), seq(nullptr), threaded(threaded_) {
         fp = gzopen(fastq_file.c_str(), "r");
         if (!fp) {
             throw std::runtime_error("Cannot open FASTQ file: " + fastq_file);
@@ -200,21 +215,49 @@ public:
             gzclose(fp);
             throw std::runtime_error("Cannot initialize kseq");
         }
-        slots.resize(concurrency);
     }
 
-    ~SharedFastqReader() {
+    ~FastqSource() {
         if (seq) kseq_destroy(seq);
         if (fp) gzclose(fp);
+    }
+
+    // Refill `out` with the next batch (locked only under multi-thread). Returns the
+    // count parsed (0 at EOF). Global read indices stay contiguous because batches are
+    // claimed in lock order.
+    size_t next_batch(std::vector<CoReadData>& out) {
+        if (!threaded) return fill(out);
+        std::lock_guard<std::mutex> lk(mu);
+        return fill(out);
+    }
+};
+
+// Per-thread view over the shared FastqSource. Holds this thread's current batch and
+// its per-coroutine slots; it refills from the source (locked once per batch) and then
+// hands reads to coroutines with zero per-read copy. Each worker thread owns one of
+// these, so the per-read path is entirely thread-local. Coroutine bodies take this by
+// reference, unchanged.
+class SharedFastqReader {
+public:
+    using ReadData = CoReadData;
+
+private:
+    FastqSource* src;
+    std::vector<CoReadData> batch;   // this thread's current batch of parsed records
+    size_t batch_pos = 0;            // next unserved record within batch
+    std::vector<CoReadData> slots;   // one slot per coroutine (zero-copy handoff)
+
+public:
+    SharedFastqReader(FastqSource& src_, int concurrency) : src(&src_) {
+        slots.resize(concurrency);
     }
 
     // Move the next record into coroutine id's slot. Returns false at EOF
     // (the slot is marked invalid).
     bool serve_next(int id) {
-        if (batch_pos >= batch.size()) refill();
+        if (batch_pos >= batch.size()) { src->next_batch(batch); batch_pos = 0; }
         if (batch_pos >= batch.size()) { slots[id].valid = false; return false; }
         slots[id] = std::move(batch[batch_pos++]);
-        slots[id].seq = served_++;
         return true;
     }
 
@@ -874,110 +917,129 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
 // already-deserialized index. The engine does not own index construction -- the
 // caller loads the index and sets up ftab/kmerbv before handing it over here.
 void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concurrency,
-                         const CoroutineQueryOptions& opts, std::ostream& out) {
+                         int nthreads, const CoroutineQueryOptions& opts, std::ostream& out) {
     init_buffered_io();
-    g_emitter.out = &out;
-    debug_enabled = opts.debug;
+    if (nthreads < 1) nthreads = 1;
+    if (concurrency < 1) concurrency = 1;
+    const bool threaded = nthreads > 1;
 
+    g_emitter.out = &out;
     // No per-run PML header is written here: PML output goes through the shared
     // output_base_stats (per-read). When writing to a file, the one-time BPFHeader is
     // written by open_output_files; stdout PML has no header. This matches the
     // sequential path, so coroutine PML output is byte-identical to it.
     g_emitter.ordered = opts.ordered_output;
-    
+    g_emitter.threaded = threaded;
+    g_emitter.next_emit = 0;
+    debug_enabled = opts.debug;
+
     auto start_time = steady_clock::now();
-    int64_t total_bases = 0;
-    
-    // Single shared reader for all coroutines
-    SharedFastqReader reader(fastq_file, concurrency);
-    
-    // Storage for coroutine handles waiting for reads
-    std::vector<coroutine_handle<>> waiting_handles(concurrency);
-    std::vector<MoveStructure::coroutine_task> coroutines;
-    coroutines.reserve(concurrency);
-    
-    // Initialize all coroutines - use move semantics
-    for (int i = 0; i < concurrency; ++i) {
-        if (opts.mem_query)
-            coroutines.push_back(std::move(mv.query_mem_coroutine(reader, waiting_handles[i], i)));
-        else if (opts.kmer_query)
-            coroutines.push_back(std::move(mv.query_kmer_coroutine(reader, waiting_handles[i], i)));
-        else
-            coroutines.push_back(std::move(mv.query_pml_coroutine(reader, waiting_handles[i], i)));
-        // They start suspended, so resume to begin execution.
-        if (coroutines[i].coro) {
-            coroutines[i].coro.resume();
-        }
-    }
-    
-    // Master scheduler loop: coordinate reads and coroutine execution
-    int active_coroutines = concurrency;
-    int iteration = 0;
-    int total_reads_served = 0;
-    
-    while (active_coroutines > 0) {
-        iteration++;
-        active_coroutines = 0;
-        
+
+    // The one shared input; every worker thread pulls batches from it. Output ordering
+    // is preserved because it assigns a single global input-order index per read.
+    FastqSource source(fastq_file, threaded);
+
+    std::atomic<int64_t> total_bases{0};
+    std::atomic<long> total_iterations{0};
+    std::atomic<long> total_reads_served{0};
+
+    // Each thread runs an independent scheduler over its own coroutines and its own
+    // view of the input; the coroutine bodies read the shared, read-only index and emit
+    // through the shared OrderedEmitter. `concurrency` is the per-thread in-flight
+    // coroutine count (latency hiding within a thread), orthogonal to nthreads (cores).
+    // The scheduler is query-agnostic -- it only resumes handles -- so PML, MEM and the
+    // k-mer queries are all parallelized here by the same loop.
+    #pragma omp parallel num_threads(nthreads)
+    {
+        SharedFastqReader reader(source, concurrency);
+        std::vector<coroutine_handle<>> waiting_handles(concurrency);
+        std::vector<MoveStructure::coroutine_task> coroutines;
+        coroutines.reserve(concurrency);
+
+        // Initialize all coroutines - use move semantics
         for (int i = 0; i < concurrency; ++i) {
-            if (coroutines[i].is_done()) {
-                DEBUG_MSG_CO("DEBUG: Coroutine %d is done\n", i);
-                continue;
+            if (opts.mem_query)
+                coroutines.push_back(std::move(mv.query_mem_coroutine(reader, waiting_handles[i], i)));
+            else if (opts.kmer_query)
+                coroutines.push_back(std::move(mv.query_kmer_coroutine(reader, waiting_handles[i], i)));
+            else
+                coroutines.push_back(std::move(mv.query_pml_coroutine(reader, waiting_handles[i], i)));
+            // They start suspended, so resume to begin execution.
+            if (coroutines[i].coro) {
+                coroutines[i].coro.resume();
             }
-            
-            // Check if this coroutine is waiting for a read
-            if (waiting_handles[i]) {
-                total_reads_served++;
-                // Move the next batched record into this coroutine's slot.
-                if (reader.serve_next(i)) {
-                    total_bases += reader.slot(i).sequence.length();
+        }
+
+        // Per-thread scheduler loop: coordinate reads and coroutine execution
+        int active_coroutines = concurrency;
+        long iteration = 0;
+        long reads_served = 0;
+        int64_t bases = 0;
+
+        while (active_coroutines > 0) {
+            iteration++;
+            active_coroutines = 0;
+
+            for (int i = 0; i < concurrency; ++i) {
+                if (coroutines[i].is_done()) {
+                    continue;
                 }
-                // Clear the slot BEFORE resuming. If the coroutine finishes this
-                // read without ever hitting co_yield (e.g. a read shorter than k,
-                // which skips the whole search), it will loop straight back to
-                // co_await and re-register its handle here during the resume();
-                // clearing after the resume would clobber that fresh await and the
-                // coroutine would be resumed next iteration with no new read served
-                // -- re-processing the moved-from (empty) slot as a phantom record.
-                auto h = waiting_handles[i];
-                waiting_handles[i] = nullptr;
-                h.resume();
-                if (!coroutines[i].is_done()) {
-                    active_coroutines++;
-                }
-            } else {
-                DEBUG_MSG_CO("DEBUG: Scheduler iteration %d, coroutine %d not waiting (handle is %s)\n",
-                     iteration, i, (waiting_handles[i] ? "set" : "null"));
-                // Not waiting for read - just resume (handles co_yield for voluntary suspension)
-                if (coroutines[i].coro) {
-                    coroutines[i].coro.resume();
+
+                // Check if this coroutine is waiting for a read
+                if (waiting_handles[i]) {
+                    reads_served++;
+                    // Move the next batched record into this coroutine's slot.
+                    if (reader.serve_next(i)) {
+                        bases += reader.slot(i).sequence.length();
+                    }
+                    // Clear the slot BEFORE resuming. If the coroutine finishes this
+                    // read without ever hitting co_yield (e.g. a read shorter than k,
+                    // which skips the whole search), it will loop straight back to
+                    // co_await and re-register its handle here during the resume();
+                    // clearing after the resume would clobber that fresh await and the
+                    // coroutine would be resumed next iteration with no new read served
+                    // -- re-processing the moved-from (empty) slot as a phantom record.
+                    auto h = waiting_handles[i];
+                    waiting_handles[i] = nullptr;
+                    h.resume();
                     if (!coroutines[i].is_done()) {
                         active_coroutines++;
+                    }
+                } else {
+                    // Not waiting for read - just resume (handles co_yield for voluntary suspension)
+                    if (coroutines[i].coro) {
+                        coroutines[i].coro.resume();
+                        if (!coroutines[i].is_done()) {
+                            active_coroutines++;
+                        }
                     }
                 }
             }
         }
-    }
-    
-    fprintf(stderr_buf, "Scheduler completed: %d iterations, %d reads served to coroutines\n", 
-            iteration, total_reads_served);
-    
+
+        total_bases += bases;
+        total_iterations += iteration;
+        total_reads_served += reads_served;
+    }  // implicit barrier: all threads have finished before we drain the emitter
+
     // Emit any buffered output in input order and flush (part of the timed region).
     g_emitter.finish();
 
     // Calculate final statistics
     auto end_time = steady_clock::now();
     double total_elapsed = duration_cast<duration<double>>(end_time - start_time).count();
-    
+
     // Calculate nanoseconds per base
     double nanoseconds_per_base = 0.0;
-    if (total_bases > 0) {
+    if (total_bases.load() > 0) {
         double total_elapsed_ns = total_elapsed * 1e9; // Convert seconds to nanoseconds
-        nanoseconds_per_base = total_elapsed_ns / total_bases;
+        nanoseconds_per_base = total_elapsed_ns / static_cast<double>(total_bases.load());
     }
-    
+
+    fprintf(stderr_buf, "Scheduler completed: %ld iterations (summed over %d thread(s)), %ld reads served to coroutines\n",
+            total_iterations.load(), nthreads, total_reads_served.load());
     fprintf(stderr_buf, "Completed processing (elapsed: %.2f sec, %.1f ns/base, bases=%ld)\n",
-            total_elapsed, nanoseconds_per_base, static_cast<long>(total_bases));
+            total_elapsed, nanoseconds_per_base, static_cast<long>(total_bases.load()));
 }
 
 

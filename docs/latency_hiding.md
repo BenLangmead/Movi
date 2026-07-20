@@ -125,6 +125,27 @@ The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id 
   styles pull away from sequential as reads lengthen, which is what the memory-latency
   argument predicts: longer reads mean longer LF chains and more latency to hide.
 
+  These are single-core numbers. **The coroutine path is also multithreaded: it scales
+  with `-t`.** `run_coroutine_query` runs one independent scheduler per worker thread
+  under an OpenMP region, sharing only the input (a locked batch source) and the
+  input-order output emitter. `-s`/`--strands` is the per-thread in-flight coroutine count
+  (latency hiding within a thread); `-t`/`--threads` is the number of cores; total
+  in-flight coroutines is their product. On the 13 kb HiFi reads (hprc94, `-s 8`,
+  load-excluded, exclusive node, medians):
+
+  | threads | 1 | 2 | 4 | 8 | 16 | 24 | 48 |
+  |---|---|---|---|---|---|---|---|
+  | M bases/s | 21.4 | 33.0 | 74.1 | 76.9 | **103.1** | 84.0 | 86.2 |
+
+  It scales to a peak around the physical-core count (~16 here, ~4.8x over one thread),
+  then flattens and dips: latency hiding turns latency stalls into memory-bandwidth
+  demand, so a memory-latency-bound query becomes memory-bandwidth-bound once enough
+  streams are in flight. Because the streams that saturate the memory subsystem are a
+  shared, per-socket resource, **the per-thread strand count that pays off is lower when
+  many threads run** -- `-t 16 -s 8` (128 streams in flight) is near the plateau, and
+  pushing either knob much past that oversubscribes bandwidth rather than helping. Output
+  is byte-identical between one thread and many.
+
   Earlier profiling reported a read-length **crossover**, with the strand scheduler
   overtaking the coroutine on 13 kb HiFi. That no longer holds. The strand and sequential
   figures here reproduce the earlier ones closely (28.60 vs ~28.3, 17.18 vs ~17.8), but
