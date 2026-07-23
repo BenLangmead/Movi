@@ -813,7 +813,6 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
 
                 if (did_search) {
                     // ---- query_kmers_from(mq, pos_on_r, single=count_mode, &kc) inlined ----
-                    const int32_t kmer_end = pos_on_r;   // captured before pos_on_r moves
                     int32_t pos_saved = pos_on_r;
                     uint64_t match_len = 0;
                     MoveInterval init_iv;
@@ -890,7 +889,11 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
                         // path (query_all_kmers): an absent k-mer passes count 0, which
                         // add_kmer treats as a no-op (no poslist entry, no found tally),
                         // while a present k-mer records kc as its occurrence multiplicity.
-                        mq.add_kmer(kmer_end - k + 1, found,
+                        // The position is the leftmost k-mer of the found run, pos_on_r +
+                        // 2 - k (pos_on_r has been advanced to that run's left end + k - 2),
+                        // the same expression the non-count branch and the sequential
+                        // query_kmers_from caller use.
+                        mq.add_kmer(pos_on_r + 2 - k, found,
                                     std::numeric_limits<uint64_t>::max(), kc);
                     } else {
                         mq.add_kmer(pos_on_r + 2 - k, found);
