@@ -76,6 +76,20 @@ if not shared or unmatched or bad:
 print("PASS: coroutine PML matches sequential in mode %s (%d reads)" % (m,len(shared)))
 PY
   then fail=1; fi
+
+  # k-mer count, coroutine vs sequential (file mode, so the sequential run-stats block on
+  # stdout does not confound the diff). This fixture's mostly-present reads form long
+  # positive-skip runs, which exercise the count branch's reported position -- a divergence
+  # that ecoli100 (this check's usual index) happens not to trigger. k is small because the
+  # fixture reference is small.
+  KC=10
+  "$MV" query -i "$idx" -r "$READS" --kmer-count -k "$KC" --coroutine -s 8 -t 1 -o "$WORK/kccor$m" >/dev/null 2>&1
+  "$MV" query -i "$idx" -r "$READS" --kmer-count -k "$KC" --no-prefetch      -o "$WORK/kcseq$m" >/dev/null 2>&1
+  if diff -q <(sort "$WORK/kccor$m.kmers.$KC") <(sort "$WORK/kcseq$m.kmers.$KC") >/dev/null 2>&1; then
+    echo "PASS: coroutine k-mer count matches sequential in mode $m"
+  else
+    echo "FAIL: coroutine k-mer count diverges from sequential in mode $m"; fail=1
+  fi
 done
 
 # Cross-mode sanity: PML values are mode-independent, so the sequential outputs must
