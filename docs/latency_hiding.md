@@ -147,22 +147,58 @@ The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id 
   | coroutine | 24 | 8 | 64 | **highest** |
   | strand | 32 | 32 | 16 | ~10% lower |
 
-  The **coroutine wins at both single core and, once tuned, at many cores** -- it is the
-  better latency hider per core and stays ahead in aggregate. Both peak near the
-  physical-core count (`-t` beyond that lands on hyperthreads and does not help), and the
-  per-thread `-s` that pays off is *lower* when many threads run, since `-s` x `-t`
-  in-flight streams share one memory subsystem -- so tune `-s` down as `-t` rises.
+  The coroutine wins at both single core and, once tuned, at many cores, and both peak
+  near the physical-core count (`-t` beyond that lands on hyperthreads and does not help).
 
-  Two cautions on this comparison. First, the two styles run the **same** LF-walk
-  algorithm, so they issue the **same** memory accesses per base; neither needs more
-  bandwidth per step, and the small aggregate difference is per-core latency-hiding
-  efficiency, not memory traffic. Second, an earlier reading had the strand scheduler
-  beating the coroutine at high `-t`; that was an artifact of the coroutine's old coarse
-  256-read batch starving threads on a 1923-read input (only ~7 work units for 24+
-  threads), not a real effect -- with a load-balancing batch it disappears.
+  **What limits high-`-t` throughput is input parsing, not latency hiding or memory.**
+  Originally the whole FASTQ/A parse ran under one mutex, and the serialized (under-lock)
+  fraction of wall time climbed with threads until it dominated -- an Amdahl ceiling that
+  *capped* throughput and then reduced it as workers thrashed on the lock. The serialized
+  fractions quoted below were measured during development with temporary instrumentation:
 
-  Recommendation: **use the coroutine for PML at any core count**; leave the batch at its
-  default unless the input has very few reads, and lower `-s` as you raise `-t`.
+  | threads | 8 | 16 | 24 | 48 |
+  |---|---|---|---|---|
+  | serialized (all-parse-under-lock) | 31% | 59% | 84% | 97% |
+  | M bases/s | 159 | 303 | 417 | **208** (collapsed) |
+
+  That the limit is parsing and not memory bandwidth was shown two ways: the serialized
+  fraction tracks it exactly, and gzipped input -- which leaves index memory traffic
+  unchanged but makes parsing heavier -- pins the serialized fraction at 99.5% and slows
+  the run 10x. (The two styles also run the same LF walk and issue the same memory accesses
+  per base, so bandwidth per step cannot separate them anyway.)
+
+  A raw, uncompressed, regular file is therefore **memory-mapped and parsed off the lock**:
+  only a record-boundary scan runs under the mutex, and each read's strings are built in the
+  worker thread from the mapped bytes. This roughly halves the serialized fraction and
+  removes the collapse:
+
+  | threads | 1 | 8 | 16 | 24 | 32 | 48 |
+  |---|---|---|---|---|---|---|
+  | M bases/s (mmap, off-lock parse) | 23 | 167 | 313 | 455 | 526 | **556** |
+  | serialized (% of wall) | 2% | 15% | 27% | 43% | 55% | 71% |
+
+  Output stays byte-identical and in input order. This is near-linear to the 24 physical
+  cores (23 -> 455 M bases/s, ~20x), then sublinear on hyperthreads, and it does not
+  collapse. The serialized fraction still climbs -- the under-lock claim scan touches every
+  page -- but note that throughput keeps *rising* while it does (526 -> 556 from 32 to 48
+  threads): on a cached file that under-lock work is soft faults plus a memchr scan that
+  **overlap with compute** (the lock holder scans while the other threads run), so it is not
+  actually on the critical path, and the serialized fraction overstates it. Forcing those
+  page-ins to happen up front in parallel was tried: it cuts the serialized fraction to ~16%
+  but runs ~15% *slower* on a warm file, because it only pulls that cheap work out of the
+  compute shadow, so it is not done. Gzip/stdin/pipe input keeps the original kseq-under-lock
+  parser and its lower ceiling.
+
+  One caveat on the coroutine-vs-strand comparison earlier in this section: the strand path
+  still parses its input under its own lock, so at high `-t` it remains parse-limited while
+  the coroutine (on a raw file) does not. A clean latency-hiding comparison at scale would
+  need the strand path on the same off-lock parser. (An earlier reading that had strand
+  beating the coroutine was a *different* artifact -- the coroutine's old 256-read batch
+  starving threads on a 1923-read input -- now fixed by the load-balancing batch.)
+
+  Recommendation: **use the coroutine for PML**; on raw files it scales near-linearly to the
+  physical-core count and on to ~48 threads. Leave the batch at its default unless the input
+  has very few reads (smaller batch), and lower `-s` as you raise `-t`.
 - The coroutine PML body is an inline reimplementation of the PML loop; the MEM and
   k-mer coroutines instead reuse the shared search primitives.
 - The manual-strand path (b) is deliberately **one shared scheduler**, not per-query

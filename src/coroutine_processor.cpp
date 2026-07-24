@@ -41,6 +41,9 @@
 #include <stdexcept>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <omp.h>
 #include <mutex>
 #include <cstring>
@@ -173,25 +176,38 @@ struct CoReadData {
     uint64_t seq = 0;
 };
 
-// The single shared input for a run. Owns the kseq parser and the global read
-// counter, and hands out whole batches so the per-read handoff stays off the lock.
-// One instance per run, shared by every worker thread; the lock is engaged only
-// when more than one thread is running, so a single-thread run pays nothing beyond
-// a batch refill every BATCH_N reads (as before).
+// The single shared input for a run, in one of two modes:
+//
+//  - MMAP (raw, uncompressed, regular files): the file is memory-mapped, and the only
+//    work done under the lock is claiming a record-aligned byte range and counting its
+//    records -- a newline scan, no allocation. The expensive part, building each read's
+//    name/sequence strings, runs OFF the lock in the worker thread straight from the
+//    mapped bytes. Keeping the serialized section tiny is what stops the single input
+//    from capping multi-thread throughput.
+//  - STREAM (gzip, a pipe, or stdin): falls back to one kseq parser run entirely under
+//    the lock, batch_n records at a time -- the original behavior.
+//
+// One instance per run, shared by every worker thread; locks engage only when threaded.
 class FastqSource {
-    gzFile fp;
-    kseq_t* seq;
     std::mutex mu;
     bool threaded;
     uint64_t served_ = 0;          // monotonic read index, for in-order output
-    size_t batch_n;                // records handed out per refill (see MOVI_CO_BATCH)
+    char fmt = 0;                  // '@' FASTQ or '>' FASTA
 
-    // Parse up to batch_n records into `out` (cleared first), tagging each with the
-    // next global input-order index. Amortizes the kseq parse / gzip-decompression
-    // call overhead: one refill every batch_n reads, not a parse per read. batch_n is
-    // also the per-thread work-claim granularity, so it trades lock/parse overhead (small
-    // batch) against load balance across threads when the input has few reads (large
-    // batch starves threads once #reads / batch_n < #threads).
+    // MMAP mode
+    bool use_mmap = false;
+    const char* data = nullptr;    // mapped file bytes
+    size_t data_size = 0;
+    size_t offset = 0;             // next unclaimed byte (guarded by mu)
+    static constexpr size_t BLOCK = 1u << 18;  // ~256 KB target claim (record-aligned)
+
+    // STREAM mode
+    gzFile fp = nullptr;
+    kseq_t* seq = nullptr;
+    size_t batch_n;                // records per refill (see MOVI_CO_BATCH)
+
+
+    // STREAM: parse up to batch_n records with kseq, under the lock.
     size_t fill(std::vector<CoReadData>& out) {
         out.clear();
         for (size_t k = 0; k < batch_n; k++) {
@@ -207,33 +223,169 @@ class FastqSource {
         return out.size();
     }
 
+    // MMAP, under the lock: from `offset`, advance to a record boundary at least BLOCK
+    // bytes ahead (or EOF), returning the byte range [p,e) and the number of complete
+    // records in it, bumping served_ and offset. Only a newline scan -- no allocation.
+    // The record rule matches parse_range exactly (4 lines = one FASTQ record; each
+    // line-initial '>' = one FASTA record), so the count equals what parse_range builds.
+    bool claim(const char*& p, const char*& e, uint64_t& base, size_t& count) {
+        if (offset >= data_size) return false;
+        size_t start = offset, pos = offset, target = offset + BLOCK, n = 0;
+        if (fmt == '@') {
+            size_t lines = 0;
+            while (pos < data_size) {
+                const char* nl = static_cast<const char*>(memchr(data + pos, '\n', data_size - pos));
+                pos = nl ? static_cast<size_t>(nl - data) + 1 : data_size;
+                if (++lines % 4 == 0) { ++n; if (pos >= target) break; }
+                if (!nl) break;
+            }
+        } else {  // FASTA: each record starts at a line-initial '>'
+            while (pos < data_size) {
+                ++n;                       // pos is at this record's '>'
+                size_t q = pos + 1;
+                while (q < data_size) {
+                    const char* nl = static_cast<const char*>(memchr(data + q, '\n', data_size - q));
+                    if (!nl) { q = data_size; break; }
+                    size_t nq = static_cast<size_t>(nl - data) + 1;
+                    if (nq < data_size && data[nq] == '>') { q = nq; break; }
+                    q = nq;
+                }
+                pos = q;
+                if (pos >= target) break;
+            }
+        }
+        p = data + start; e = data + pos;
+        base = served_; served_ += n; offset = pos; count = n;
+        return n > 0;
+    }
+
+    // MMAP, off the lock: parse [p,e) into `out`, matching kseq's fields (name = bytes
+    // after '@'/'>' up to the first whitespace; sequence = the sequence line(s), any
+    // trailing '\r' stripped). Produces exactly the record count claim() reported.
+    void parse_range(const char* p, const char* e, uint64_t base, std::vector<CoReadData>& out) {
+        out.clear();
+        uint64_t idx = base;
+        if (fmt == '@') {
+            while (p < e && *p == '@') {
+                const char* n0 = static_cast<const char*>(memchr(p, '\n', e - p));      if (!n0) break;
+                const char* s1 = n0 + 1;
+                const char* n1 = static_cast<const char*>(memchr(s1, '\n', e - s1));    if (!n1) break;
+                const char* s2 = n1 + 1;
+                const char* n2 = static_cast<const char*>(memchr(s2, '\n', e - s2));    if (!n2) break;
+                const char* s3 = n2 + 1;
+                const char* n3 = static_cast<const char*>(memchr(s3, '\n', e - s3));    // may be null at EOF
+                const char* nameB = p + 1, *nameE = nameB;
+                while (nameE < n0 && *nameE != ' ' && *nameE != '\t' && *nameE != '\r') ++nameE;
+                const char* se = n1; if (se > s1 && se[-1] == '\r') --se;
+                CoReadData rd;
+                rd.valid = true;
+                rd.name.assign(nameB, nameE - nameB);
+                rd.sequence.assign(s1, se - s1);
+                rd.seq = idx++;
+                out.push_back(std::move(rd));
+                if (!n3) break;
+                p = n3 + 1;
+            }
+        } else {  // FASTA (possibly multi-line sequence)
+            while (p < e && *p == '>') {
+                const char* n0 = static_cast<const char*>(memchr(p, '\n', e - p));      if (!n0) break;
+                const char* nameB = p + 1, *nameE = nameB;
+                while (nameE < n0 && *nameE != ' ' && *nameE != '\t' && *nameE != '\r') ++nameE;
+                CoReadData rd;
+                rd.valid = true;
+                rd.name.assign(nameB, nameE - nameB);
+                const char* s = n0 + 1;
+                std::string sb;
+                while (s < e && *s != '>') {
+                    const char* nl = static_cast<const char*>(memchr(s, '\n', e - s));
+                    const char* le = nl ? nl : e; if (le > s && le[-1] == '\r') --le;
+                    sb.append(s, le - s);
+                    if (!nl) { s = e; break; }
+                    s = nl + 1;
+                }
+                rd.sequence = std::move(sb);
+                rd.seq = idx++;
+                out.push_back(std::move(rd));
+                p = s;
+            }
+        }
+    }
+
 public:
     FastqSource(const string& fastq_file, bool threaded_, size_t batch_n_ = 32)
-        : fp(nullptr), seq(nullptr), threaded(threaded_), batch_n(batch_n_ ? batch_n_ : 32) {
+        : threaded(threaded_), batch_n(batch_n_ ? batch_n_ : 32) {
+        // Prefer mmap for a raw, regular, uncompressed FASTQ/FASTA file; anything else
+        // (gzip, stdin, a pipe) falls back to the kseq stream path.
+        int fd = (fastq_file != "-") ? ::open(fastq_file.c_str(), O_RDONLY) : -1;
+        if (fd >= 0) {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+                void* m = mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+                if (m != MAP_FAILED) {
+                    const unsigned char* b = static_cast<const unsigned char*>(m);
+                    bool gz = (st.st_size >= 2 && b[0] == 0x1f && b[1] == 0x8b);
+                    size_t i = 0;
+                    while (i < static_cast<size_t>(st.st_size) &&
+                           (b[i] == '\n' || b[i] == '\r' || b[i] == ' ' || b[i] == '\t')) ++i;
+                    char f = (i < static_cast<size_t>(st.st_size)) ? static_cast<char>(b[i]) : 0;
+                    if (!gz && (f == '@' || f == '>')) {
+                        use_mmap = true;
+                        data = static_cast<const char*>(m);
+                        data_size = st.st_size;
+                        offset = i;
+                        fmt = f;
+                        madvise(m, st.st_size, MADV_SEQUENTIAL);
+                        ::close(fd);
+                        return;
+                    }
+                    munmap(m, st.st_size);
+                }
+            }
+            ::close(fd);
+        }
         fp = gzopen(fastq_file.c_str(), "r");
-        if (!fp) {
-            throw std::runtime_error("Cannot open FASTQ file: " + fastq_file);
-        }
+        if (!fp) throw std::runtime_error("Cannot open FASTQ file: " + fastq_file);
         seq = kseq_init(fp);
-        if (!seq) {
-            gzclose(fp);
-            throw std::runtime_error("Cannot initialize kseq");
-        }
+        if (!seq) { gzclose(fp); throw std::runtime_error("Cannot initialize kseq"); }
     }
 
     ~FastqSource() {
         if (seq) kseq_destroy(seq);
         if (fp) gzclose(fp);
+        if (use_mmap && data) munmap(const_cast<char*>(data), data_size);
     }
 
-    // Refill `out` with the next batch (locked only under multi-thread). Returns the
-    // count parsed (0 at EOF). Global read indices stay contiguous because batches are
-    // claimed in lock order.
+    // Refill `out` with the next batch. In MMAP mode only the claim (a record-boundary
+    // scan) is serialized; the parse runs after the lock is released. Global read indices
+    // stay contiguous because ranges are claimed in lock order.
     size_t next_batch(std::vector<CoReadData>& out) {
-        if (!threaded) return fill(out);
+        if (use_mmap) {
+            const char* p; const char* e; uint64_t base; size_t count;
+            bool got;
+            if (!threaded) {
+                got = claim(p, e, base, count);
+                if (!got) { out.clear(); return 0; }
+                parse_range(p, e, base, out);
+                return out.size();
+            }
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                got = claim(p, e, base, count);
+            }
+            if (!got) { out.clear(); return 0; }
+            parse_range(p, e, base, out);   // off the lock
+            return out.size();
+        }
+        // STREAM: kseq under the lock.
+        if (!threaded) {
+            size_t n = fill(out);
+            return n;
+        }
         std::lock_guard<std::mutex> lk(mu);
-        return fill(out);
+        size_t n = fill(out);
+        return n;
     }
+
 };
 
 // Per-thread view over the shared FastqSource. Holds this thread's current batch and
@@ -1062,6 +1214,7 @@ void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concur
             total_iterations.load(), nthreads, total_reads_served.load());
     fprintf(stderr_buf, "Completed processing (elapsed: %.2f sec, %.1f ns/base, bases=%ld)\n",
             total_elapsed, nanoseconds_per_base, static_cast<long>(total_bases.load()));
+
 }
 
 
