@@ -40,6 +40,7 @@
 #include <variant>
 #include <stdexcept>
 #include <atomic>
+#include <cstdlib>
 #include <omp.h>
 #include <mutex>
 #include <cstring>
@@ -183,14 +184,17 @@ class FastqSource {
     std::mutex mu;
     bool threaded;
     uint64_t served_ = 0;          // monotonic read index, for in-order output
-    static constexpr size_t BATCH_N = 256;
+    size_t batch_n;                // records handed out per refill (see MOVI_CO_BATCH)
 
-    // Parse up to BATCH_N records into `out` (cleared first), tagging each with the
+    // Parse up to batch_n records into `out` (cleared first), tagging each with the
     // next global input-order index. Amortizes the kseq parse / gzip-decompression
-    // call overhead: one refill every BATCH_N reads, not a parse per read.
+    // call overhead: one refill every batch_n reads, not a parse per read. batch_n is
+    // also the per-thread work-claim granularity, so it trades lock/parse overhead (small
+    // batch) against load balance across threads when the input has few reads (large
+    // batch starves threads once #reads / batch_n < #threads).
     size_t fill(std::vector<CoReadData>& out) {
         out.clear();
-        for (size_t k = 0; k < BATCH_N; k++) {
+        for (size_t k = 0; k < batch_n; k++) {
             int l = kseq_read(seq);
             if (l < 0) break;  // EOF (-1) or error (-2/-3)
             CoReadData rd;
@@ -204,8 +208,8 @@ class FastqSource {
     }
 
 public:
-    FastqSource(const string& fastq_file, bool threaded_)
-        : fp(nullptr), seq(nullptr), threaded(threaded_) {
+    FastqSource(const string& fastq_file, bool threaded_, size_t batch_n_ = 32)
+        : fp(nullptr), seq(nullptr), threaded(threaded_), batch_n(batch_n_ ? batch_n_ : 32) {
         fp = gzopen(fastq_file.c_str(), "r");
         if (!fp) {
             throw std::runtime_error("Cannot open FASTQ file: " + fastq_file);
@@ -938,9 +942,24 @@ void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concur
 
     auto start_time = steady_clock::now();
 
+    // Per-thread work-claim / parse granularity, chosen by thread count. The batch is
+    // both the parse unit and the unit of work a thread claims at once, so the two ends
+    // pull opposite ways: a large batch amortizes the parse/refill (which a single thread
+    // cannot hide behind other threads), while a small batch spreads work evenly across
+    // threads (with N reads and B-read batches, at most N/B threads ever get work). A
+    // single-thread run has no balancing to do, so it keeps the large batch and its lower
+    // overhead; a multi-thread run takes the small batch, which a sweep found gives the
+    // same peak throughput as any batch up to 64 while 256 costs ~17% at the optimum and
+    // starves threads outright on small inputs. MOVI_CO_BATCH overrides both.
+    size_t co_batch = (nthreads <= 1) ? 256 : 32;
+    if (const char* e = std::getenv("MOVI_CO_BATCH")) {
+        long v = std::atol(e);
+        if (v > 0) co_batch = static_cast<size_t>(v);
+    }
+
     // The one shared input; every worker thread pulls batches from it. Output ordering
     // is preserved because it assigns a single global input-order index per read.
-    FastqSource source(fastq_file, threaded);
+    FastqSource source(fastq_file, threaded, co_batch);
 
     std::atomic<int64_t> total_bases{0};
     std::atomic<long> total_iterations{0};

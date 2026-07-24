@@ -128,29 +128,41 @@ The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id 
   These are single-core numbers. **The coroutine path is also multithreaded: it scales
   with `-t`.** `run_coroutine_query` runs one independent scheduler per worker thread
   under an OpenMP region, sharing only the input (a locked batch source) and the
-  input-order output emitter. `-s`/`--strands` is the per-thread in-flight coroutine count
-  (latency hiding within a thread); `-t`/`--threads` is the number of cores; total
-  in-flight coroutines is their product. On the 13 kb HiFi reads (hprc94, `-s 8`,
-  load-excluded, exclusive node, medians):
+  input-order output emitter. Three knobs interact:
 
-  | threads | 1 | 2 | 4 | 8 | 16 | 24 | 48 |
-  |---|---|---|---|---|---|---|---|
-  | M bases/s | 21.4 | 33.0 | 74.1 | 76.9 | **103.1** | 84.0 | 86.2 |
+  - `-s`/`--strands` -- per-thread in-flight coroutines (latency hiding within a thread).
+  - `-t`/`--threads` -- cores. Total in-flight coroutines is `-s` x `-t`.
+  - **batch** -- reads a thread claims (and parses) at once. It is both the parse unit and
+    the work-claim unit, so a small batch spreads work evenly (with N reads and B-read
+    batches, at most N/B threads get work) while a large batch has lower parse overhead.
+    The default is thread-aware -- 256 for one thread, 32 for many -- and `MOVI_CO_BATCH`
+    overrides it. (The strand path has the same tradeoff via `4*strands`; `MOVI_STRAND_BATCH`
+    overrides it.)
 
-  It scales to a peak around the physical-core count (~16 here, ~4.8x over one thread),
-  then flattens and dips: latency hiding turns latency stalls into memory-bandwidth
-  demand, so a memory-latency-bound query becomes memory-bandwidth-bound once enough
-  streams are in flight. Because the streams that saturate the memory subsystem are a
-  shared, per-socket resource, **the per-thread strand count that pays off is lower when
-  many threads run** -- `-t 16 -s 8` (128 streams in flight) is near the plateau, and
-  pushing either knob much past that oversubscribes bandwidth rather than helping. Output
-  is byte-identical between one thread and many.
+  Sweeping all three on the same 20 k-read HiFi set (hprc94, exclusive node, medians),
+  each style's own optimum is:
 
-  Earlier profiling reported a read-length **crossover**, with the strand scheduler
-  overtaking the coroutine on 13 kb HiFi. That no longer holds. The strand and sequential
-  figures here reproduce the earlier ones closely (28.60 vs ~28.3, 17.18 vs ~17.8), but
-  the coroutine roughly doubled -- ~16.5 then, 32.47 now -- so it now leads at 13 kb
-  rather than trailing. Treat any "strand wins on HiFi" guidance as superseded.
+  | style | best `-t` | best `-s` | best batch | throughput |
+  |-------|-----------|-----------|------------|------------|
+  | coroutine | 24 | 8 | 64 | **highest** |
+  | strand | 32 | 32 | 16 | ~10% lower |
+
+  The **coroutine wins at both single core and, once tuned, at many cores** -- it is the
+  better latency hider per core and stays ahead in aggregate. Both peak near the
+  physical-core count (`-t` beyond that lands on hyperthreads and does not help), and the
+  per-thread `-s` that pays off is *lower* when many threads run, since `-s` x `-t`
+  in-flight streams share one memory subsystem -- so tune `-s` down as `-t` rises.
+
+  Two cautions on this comparison. First, the two styles run the **same** LF-walk
+  algorithm, so they issue the **same** memory accesses per base; neither needs more
+  bandwidth per step, and the small aggregate difference is per-core latency-hiding
+  efficiency, not memory traffic. Second, an earlier reading had the strand scheduler
+  beating the coroutine at high `-t`; that was an artifact of the coroutine's old coarse
+  256-read batch starving threads on a 1923-read input (only ~7 work units for 24+
+  threads), not a real effect -- with a load-balancing batch it disappears.
+
+  Recommendation: **use the coroutine for PML at any core count**; leave the batch at its
+  default unless the input has very few reads, and lower `-s` as you raise `-t`.
 - The coroutine PML body is an inline reimplementation of the PML loop; the MEM and
   k-mer coroutines instead reuse the shared search primitives.
 - The manual-strand path (b) is deliberately **one shared scheduler**, not per-query

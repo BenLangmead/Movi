@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <stdio.h>
 #include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <iostream>
 #include <cstddef>
@@ -412,6 +413,16 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
 
         ReadProcessor rp(mv_, movi_options.get_strands(), movi_options.is_verbose(), movi_options.is_reverse(), output_files, classifier);
 
+        // Reads claimed per strand batch (the per-thread work-claim granularity for the
+        // strand scheduler). Default 4*strands; MOVI_STRAND_BATCH overrides it for
+        // benchmarking the batch-size vs load-balance tradeoff, mirroring MOVI_CO_BATCH
+        // on the coroutine path.
+        size_t strand_batch_reads = 4 * movi_options.get_strands();
+        if (const char* e = std::getenv("MOVI_STRAND_BATCH")) {
+            long v = std::atol(e);
+            if (v > 0) strand_batch_reads = static_cast<size_t>(v);
+        }
+
 #pragma omp parallel
         {
             BatchLoader reader;
@@ -421,7 +432,7 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                 bool valid_batch = true;
                 #pragma omp critical // one reader at a time
                 {
-                    valid_batch = reader.loadBatch(input_file, 1000, 4*movi_options.get_strands());
+                    valid_batch = reader.loadBatch(input_file, 1000, strand_batch_reads);
                 }
                 if (!valid_batch) {
                     break;
