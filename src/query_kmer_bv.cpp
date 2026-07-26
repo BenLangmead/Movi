@@ -409,8 +409,7 @@ uint64_t MoveStructure::query_kmers_count_bv(MoveQuery& mq, int32_t& pos_on_r) {
     }
 
     if (kmers_found > 0) {
-        #pragma omp atomic
-        kmer_stats.positive_skipped += kmers_found - 1;
+                thread_kmer_stats().positive_skipped += kmers_found - 1;
         // pos_on_r is the leftmost resolved k-mer's start; the next k-mer to
         // process ends at pos_on_r + k - 2 (mirrors query_kmers_from).
         pos_on_r = pos_on_r + k - 2;
@@ -492,8 +491,7 @@ uint64_t MoveStructure::query_kmers_id_bv(MoveQuery& mq, int32_t& pos_on_r) {
     }
 
     if (kmers_found > 0) {
-        #pragma omp atomic
-        kmer_stats.positive_skipped += kmers_found - 1;
+                thread_kmer_stats().positive_skipped += kmers_found - 1;
         pos_on_r = pos_on_r + k - 2;
     } else {
         pos_on_r = pos_on_r_saved - 1;

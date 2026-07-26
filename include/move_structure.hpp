@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <vector>
+#include <omp.h>          // per-thread k-mer statistics slots
 #include <unordered_map>
 #include <map>
 #include <sstream>
@@ -293,6 +294,43 @@ class MoveStructure {
 /***************************************************************************/
 
 	    KmerStatistics kmer_stats;
+
+        // Per-thread k-mer tallies, merged into kmer_stats by merge_kmer_stats() once a
+        // query run is over. The k-mer queries update these counters for every k-mer, so
+        // a single shared tally puts every thread on the same few cache lines: even as
+        // atomics they were what limited how the query scaled, not the query work.
+        // Each slot is padded to its own cache line so neighbouring threads stay apart.
+        struct alignas(64) PaddedKmerStatistics {
+            KmerStatistics stats;
+        };
+        // Sized at construction so thread_kmer_stats() is always valid; prepare and
+        // merge only zero it.
+        std::vector<PaddedKmerStatistics> kmer_stats_per_thread =
+            std::vector<PaddedKmerStatistics>(omp_get_max_threads());
+
+        // This thread's tally. Callers take the reference once per query call rather
+        // than looking it up for each counter update. The vector is always sized to
+        // omp_get_max_threads(), so there is no empty case to fall back on: a fallback
+        // to the shared tally would reintroduce, silently, the contention and the race
+        // this exists to remove.
+        KmerStatistics& thread_kmer_stats() {
+            return kmer_stats_per_thread[omp_get_thread_num()].stats;
+        }
+
+        // Zero the per-thread tallies. Call outside any parallel region, before a query.
+        void prepare_kmer_stats() {
+            kmer_stats_per_thread.assign(omp_get_max_threads(), PaddedKmerStatistics());
+        }
+
+        // Fold the per-thread tallies into kmer_stats and zero them again. Call after
+        // the parallel region and before anything reports the statistics.
+        void merge_kmer_stats() {
+            for (auto& p : kmer_stats_per_thread) {
+                kmer_stats.merge(p.stats);
+            }
+            kmer_stats_per_thread.assign(kmer_stats_per_thread.size(), PaddedKmerStatistics());
+        }
+
         friend class ReadProcessor;
     private:
         // Reference to output files for writing results

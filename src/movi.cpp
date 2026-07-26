@@ -103,12 +103,12 @@ void handle_kmer(MoveQuery& mq, MoviOptions& movi_options,
         size_t L = mq.query().length();
         size_t total = (L >= k) ? (L - k + 1) : 0;
         size_t invalid = count_invalid_kmer_windows(mq.query(), k);
-        #pragma omp atomic
-        mv_.kmer_stats.agg_num_kmers += total;
-        #pragma omp atomic
-        mv_.kmer_stats.agg_invalid += invalid;
-        #pragma omp atomic
-        mv_.kmer_stats.agg_positive += mq.found_kmer_count;
+        // Accumulated per thread and merged once the query is over, like the rest of
+        // the k-mer tallies, so threads do not contend for these cache lines.
+        KmerStatistics& ks = mv_.thread_kmer_stats();
+        ks.agg_num_kmers += total;
+        ks.agg_invalid += invalid;
+        ks.agg_positive += mq.found_kmer_count;
     }
 
     // Emit per-k-mer output in both presence and count modes.  (Count mode now
@@ -423,6 +423,10 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
 
     uint64_t total_ff_count = 0;
 
+    // One k-mer tally per thread for the duration of the query; merged into
+    // mv_.kmer_stats below, before anything reports it.
+    mv_.prepare_kmer_stats();
+
     auto begin = std::chrono::system_clock::now();
 
     if (!movi_options.no_prefetch()) {
@@ -584,6 +588,9 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
     auto end = std::chrono::system_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
     TIMING_MSG(elapsed, "processing the reads");
+
+    // Fold the per-thread k-mer tallies together before any of them are reported.
+    mv_.merge_kmer_stats();
 
     if (movi_options.write_output_allowed()) {
         print_query_stats(movi_options, total_ff_count, mv_);
