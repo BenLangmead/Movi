@@ -43,6 +43,12 @@ public:
     ~BatchLoader() {};
 
     bool loadBatch(std::ifstream& input, size_t num_bases, size_t min_number_of_reads);
+    // Load a batch from an already record-aligned byte range, as claimed by
+    // MmapBatchSource, rather than reading it from the shared stream. `fmt` is the
+    // input's first character ('@' or '>'). Records are served afterwards by
+    // grabNextRead exactly as they are for a stream-loaded batch, so the two input
+    // paths agree field for field.
+    bool loadBatchFromRange(const char* begin, const char* end, char fmt);
     bool grabNextRead(Read& curr_read);
     
 private:

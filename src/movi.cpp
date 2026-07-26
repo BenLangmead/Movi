@@ -21,6 +21,7 @@
 #include "coroutine_processor.hpp"
 #include "classifier.hpp"
 #include "batch_loader.hpp"
+#include "mmap_batch_source.hpp"
 
 // Function to handle PML/ZML processing for a single read
 uint64_t handle_pml_zml(MoveQuery& mq, MoviOptions& movi_options,
@@ -357,6 +358,12 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
     std::ifstream input_file;
     setup_input_file(input_file, movi_options.get_read_file());
 
+    // Maps the input when it is a raw regular FASTA/FASTQ file, so the batch loops below
+    // serialize only a record-boundary claim and build their batches in the worker
+    // thread. It reports is_mmap() == false for gzip, stdin and pipes, and those keep
+    // reading input_file under the lock.
+    MmapBatchSource batch_source(movi_options.get_read_file());
+
     OutputFiles output_files;
     open_output_files(movi_options, output_files);
     mv_.set_output_files(&output_files);
@@ -430,12 +437,27 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
             // Iterates over batches of data until none left
             while (true) {
                 bool valid_batch = true;
-                #pragma omp critical // one reader at a time
-                {
-                    valid_batch = reader.loadBatch(input_file, 1000, strand_batch_reads);
-                }
-                if (!valid_batch) {
-                    break;
+                // With a mapped input only the record-boundary claim is serialized and the
+                // batch is built in this thread; otherwise the whole parse stays under the
+                // lock, as it must for gzip and stdin.
+                if (batch_source.is_mmap()) {
+                    const char* p = nullptr; const char* e = nullptr;
+                    #pragma omp critical // one claimer at a time
+                    {
+                        valid_batch = batch_source.claim(p, e, 1000, strand_batch_reads);
+                    }
+                    if (!valid_batch) {
+                        break;
+                    }
+                    reader.loadBatchFromRange(p, e, batch_source.format());
+                } else {
+                    #pragma omp critical // one reader at a time
+                    {
+                        valid_batch = reader.loadBatch(input_file, 1000, strand_batch_reads);
+                    }
+                    if (!valid_batch) {
+                        break;
+                    }
                 }
 
                 // The strand scheduler serves PML, ZML and whole-read exact-count. k-mer
@@ -473,11 +495,21 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
             // Iterates over batches of data until none left
             while (true) {
                 bool valid_batch = true;
-                #pragma omp critical // one reader at a time
-                {
-                    valid_batch = reader.loadBatch(input_file, 1000, 1);
+                if (batch_source.is_mmap()) {
+                    const char* p = nullptr; const char* e = nullptr;
+                    #pragma omp critical // one claimer at a time
+                    {
+                        valid_batch = batch_source.claim(p, e, 1000, 1);
+                    }
+                    if (!valid_batch) break;
+                    reader.loadBatchFromRange(p, e, batch_source.format());
+                } else {
+                    #pragma omp critical // one reader at a time
+                    {
+                        valid_batch = reader.loadBatch(input_file, 1000, 1);
+                    }
+                    if (!valid_batch) break;
                 }
-                if (!valid_batch) break;
                 
                 Read read_struct;
                 bool valid_read = false;

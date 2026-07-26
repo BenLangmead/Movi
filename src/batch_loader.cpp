@@ -88,6 +88,27 @@ bool BatchLoader::loadBatch(std::ifstream& input, size_t num_bases, size_t min_n
     return valid_batch;
 }
 
+bool BatchLoader::loadBatchFromRange(const char* begin, const char* end, char fmt) {
+    /* Loads a batch from a record-aligned byte range claimed out of a mapped file.
+       The range already ends on a record boundary, so unlike loadBatch there is no
+       scanning to do here: the bytes are handed to the same batch_stream that
+       grabNextRead consumes. */
+
+    if (input_format == NOT_CLEAR) {
+        switch (fmt) {
+            case '>': input_format = FA; break;
+            case '@': input_format = FQ; break;
+            default: FATAL_ERROR("unrecognized input query file type - expects FASTA or FASTQ.");
+        }
+    }
+
+    if (begin >= end) return false;
+
+    batch_stream.clear();
+    batch_stream.str(std::string(begin, end));
+    return true;
+}
+
 bool BatchLoader::grabNextRead(Read& curr_read) {
     /* Grabs a read from the batch loaded into the BatchLoader object */
 
