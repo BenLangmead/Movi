@@ -210,6 +210,29 @@ else
 fi
 ((TOTAL_TESTS++))
 
+# Thread determinism (PML, ZML and count at -t 1 vs several threaded configurations).
+# The other suites all run single-threaded, so this is the only one that can see a
+# race between worker threads. Needs an index to query, so it is skipped unless
+# MOVI_TEST_SEP_INDEX names one.
+if [ -n "${MOVI_TEST_SEP_INDEX:-}" ]; then
+    print_status "Running thread-determinism regression..."
+    echo "----------------------------------------"
+    if bash "$PROJECT_ROOT/tests/regression_thread_determinism.sh" "$(pwd)"; then
+        echo "----------------------------------------"
+        print_success "thread-determinism regression passed"
+        echo ""
+    else
+        echo "----------------------------------------"
+        print_error "thread-determinism regression failed"
+        echo ""
+        ((FAILED_TESTS++))
+    fi
+    ((TOTAL_TESTS++))
+else
+    print_status "Skipping thread-determinism regression (set MOVI_TEST_SEP_INDEX to enable)"
+    echo ""
+fi
+
 # Re-enable exit on error
 set -e
 
