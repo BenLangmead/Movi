@@ -69,6 +69,8 @@ class ReadProcessor {
         bool backward_search(Strand& process, uint64_t end_pos);
         void reset_process(Strand& process, BatchLoader& reader);
         void reset_backward_search(Strand& process);
+        void record_zml_match(Strand& process);
+        void report_progress();
 
 #if TALLY_MODES
         void process_char_tally(Strand& process);

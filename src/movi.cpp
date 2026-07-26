@@ -34,15 +34,21 @@ uint64_t handle_pml_zml(MoveQuery& mq, MoviOptions& movi_options,
         ff_count += mv_.query_zml(mq);
     }
 
-    #pragma omp critical
-    {
-        if (movi_options.is_classify()) {
-            std::vector<uint16_t> matching_lens_16(mq.get_matching_lengths().begin(), mq.get_matching_lengths().end());
-            // Classification with 32 bits pmls works if the pml values are less than 2^16.
+    // Classification and output are separate shared resources, so they take separate
+    // named locks and a run that does neither takes none at all. An unnamed `omp
+    // critical` would put both of them, and the input claim, on one process-wide lock.
+    if (movi_options.is_classify()) {
+        std::vector<uint16_t> matching_lens_16(mq.get_matching_lengths().begin(), mq.get_matching_lengths().end());
+        // Classification with 32 bits pmls works if the pml values are less than 2^16.
+        bool found = false;
+        #pragma omp critical(movi_classify)
+        {
+            found = classifier.classify(mq.get_query_id(), matching_lens_16, movi_options);
+        }
 
-            bool found = classifier.classify(mq.get_query_id(), matching_lens_16, movi_options);
-
-            if (movi_options.is_filter() && !movi_options.is_no_output()) {
+        if (movi_options.is_filter() && !movi_options.is_no_output()) {
+            #pragma omp critical(movi_output)
+            {
                 if (found && !movi_options.is_invert()) {
                     output_read(mq);
                 } else if (!found && movi_options.is_invert()) {
@@ -50,8 +56,11 @@ uint64_t handle_pml_zml(MoveQuery& mq, MoviOptions& movi_options,
                 }
             }
         }
+    }
 
-        if (movi_options.write_output_allowed()) {
+    if (movi_options.write_output_allowed()) {
+        #pragma omp critical(movi_output)
+        {
             std::ostream& mls_dest = movi_options.write_stdout_enabled()
                 ? static_cast<std::ostream&>(std::cout)
                 : static_cast<std::ostream&>(output_files.mls_file);
@@ -75,7 +84,7 @@ void handle_count(MoveQuery& mq, MoviOptions& movi_options,
     uint64_t match_count = mv_.query_backward_search(mq, pos_on_r);
 
     if (movi_options.write_output_allowed()) {
-        #pragma omp critical
+        #pragma omp critical(movi_output)
         {
             output_counts(movi_options.write_stdout_enabled(), output_files.matches_file, mq.query().length(), pos_on_r, match_count, mq);
         }
@@ -107,7 +116,7 @@ void handle_kmer(MoveQuery& mq, MoviOptions& movi_options,
     // suppressed here.)  The sshash format suppresses per-read lines (handled in
     // output_kmers) and prints its aggregate report once at the end.
     if (movi_options.write_output_allowed()) {
-        #pragma omp critical
+        #pragma omp critical(movi_output)
         {
             output_kmers(movi_options.write_stdout_enabled(), output_files.kmer_file,
                          mq.query().length() - movi_options.get_k() + 1, mq, movi_options);
@@ -120,7 +129,7 @@ void handle_mem(MoveQuery& mq, MoviOptions& movi_options,
                 MoveStructure& mv_, OutputFiles& output_files) {
     mv_.query_mems(mq);
     if (movi_options.write_output_allowed()) {
-        #pragma omp critical
+        #pragma omp critical(movi_output)
         {
             output_mems(movi_options.write_stdout_enabled(), output_files.mems_file, mq);
         }
@@ -442,7 +451,7 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                 // lock, as it must for gzip and stdin.
                 if (batch_source.is_mmap()) {
                     const char* p = nullptr; const char* e = nullptr;
-                    #pragma omp critical // one claimer at a time
+                    #pragma omp critical(movi_input) // one claimer at a time
                     {
                         valid_batch = batch_source.claim(p, e, 1000, strand_batch_reads);
                     }
@@ -451,7 +460,7 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                     }
                     reader.loadBatchFromRange(p, e, batch_source.format());
                 } else {
-                    #pragma omp critical // one reader at a time
+                    #pragma omp critical(movi_input) // one reader at a time
                     {
                         valid_batch = reader.loadBatch(input_file, 1000, strand_batch_reads);
                     }
@@ -497,20 +506,20 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                 bool valid_batch = true;
                 if (batch_source.is_mmap()) {
                     const char* p = nullptr; const char* e = nullptr;
-                    #pragma omp critical // one claimer at a time
+                    #pragma omp critical(movi_input) // one claimer at a time
                     {
                         valid_batch = batch_source.claim(p, e, 1000, 1);
                     }
                     if (!valid_batch) break;
                     reader.loadBatchFromRange(p, e, batch_source.format());
                 } else {
-                    #pragma omp critical // one reader at a time
+                    #pragma omp critical(movi_input) // one reader at a time
                     {
                         valid_batch = reader.loadBatch(input_file, 1000, 1);
                     }
                     if (!valid_batch) break;
                 }
-                
+
                 Read read_struct;
                 bool valid_read = false;
 
@@ -519,13 +528,17 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                     valid_read = reader.grabNextRead(read_struct);
                     if (!valid_read) break;
 
-                    #pragma omp atomic
-                    read_processed += 1 ;
+                    uint64_t processed = 0;
+                    #pragma omp atomic capture
+                    processed = ++read_processed;
 
-                    #pragma omp critical
-                    {
-                        if (read_processed % 1000 == 0) {
-                            QUERY_PROGRESS_MSG("Number of reads processed: " + format_number_with_commas(read_processed));
+                    // The counter is atomic, so no lock is needed to read it, but the
+                    // message itself is output: std::cerr is tied to std::cout, so
+                    // emitting it flushes std::cout and must not race another writer.
+                    if (processed % 1000 == 0) {
+                        #pragma omp critical(movi_output)
+                        {
+                            QUERY_PROGRESS_MSG("Number of reads processed: " + format_number_with_commas(processed));
                         }
                     }
 
@@ -556,7 +569,7 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
 
                     if (movi_options.is_logs()) {
                         if (movi_options.write_output_allowed()) {
-                            #pragma omp critical
+                            #pragma omp critical(movi_output)
                             {
                                 output_logs(output_files.costs_file, output_files.scans_file, output_files.fastforwards_file, mq);
                             }

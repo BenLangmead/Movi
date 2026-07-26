@@ -639,6 +639,28 @@ void ReadProcessor::end_process() {
     }
 }
 
+// Record one finished ZML matching length on this strand. Every field touched belongs
+// to `process`, which is owned by the calling thread, and get_SA_entries only reads the
+// index, so this runs without synchronization.
+void ReadProcessor::record_zml_match(Strand& process) {
+    process.mq.add_ml(process.match_len, mv.movi_options->write_stdout_enabled());
+    if (mv.movi_options->is_get_sa_entries()) {
+        uint64_t sa_entry = mv.get_SA_entries(process.idx, process.offset);
+        process.mq.add_sa_entries(sa_entry);
+    }
+}
+
+// Report progress from the shared read counter. The counter is maintained with an
+// atomic update in next_read, so it is read atomically here rather than under a lock.
+void ReadProcessor::report_progress() {
+    uint64_t processed = 0;
+    #pragma omp atomic read
+    processed = read_processed;
+    if (processed % 1000 == 0) {
+        QUERY_PROGRESS_MSG("Number of reads processed: " + format_number_with_commas(processed));
+    }
+}
+
 void ReadProcessor::process_latency_hiding(BatchLoader& reader) {
     bool is_pml = mv.movi_options->is_pml();
     bool is_zml = mv.movi_options->is_zml();
@@ -649,11 +671,9 @@ void ReadProcessor::process_latency_hiding(BatchLoader& reader) {
     }
 
     std::vector<Strand> processes;
-    uint64_t finished_count = 0;
-    #pragma omp critical
-    {
-        finished_count = initialize_strands(processes, reader);
-    }
+    // Strand state, the batch reader and this counter are all owned by the calling
+    // thread, so setting the strands up needs no synchronization.
+    uint64_t finished_count = initialize_strands(processes, reader);
 
     while (finished_count != strands) {
         for (uint64_t i = 0; i < strands; i++) {
@@ -662,59 +682,57 @@ void ReadProcessor::process_latency_hiding(BatchLoader& reader) {
                 bool backward_search_finished = false; // used for the count and zml queries
                 if (is_pml) {
                     process_char(processes[i]);
-                } else if (is_count) {
-                    // backward_search_finished = backward_search(processes[i], processes[i].mq.query().length() - 1);
-                    backward_search_finished = backward_search(processes[i], processes[i].kmer_end);
-                } else if (is_zml) {
+                } else if (is_count or is_zml) {
                     backward_search_finished = backward_search(processes[i], processes[i].kmer_end);
                 }
-                // 2: if the read is done -> Write the pmls and go to next read
-                if ((is_pml and processes[i].pos_on_r <= -1) or
-                    (is_count and backward_search_finished) or
-                    (is_zml and (backward_search_finished and processes[i].pos_on_r > 0)) or
-                    (is_zml and (processes[i].pos_on_r <= 0))) {
-                    #pragma omp critical
+
+                // 2a: ZML only -- a matching length ended part way through the read.
+                // Record it and resume from the previous position; the read is not done,
+                // so there is nothing to write and no next read to fetch.
+                if (is_zml and backward_search_finished and processes[i].pos_on_r > 0) {
+                    record_zml_match(processes[i]);
+                    processes[i].pos_on_r -= 1;
+                    reset_backward_search(processes[i]);
+                    processes[i].kmer_end = processes[i].pos_on_r;
+
+                // 2b: the read is done -> write its result and move to the next read
+                } else if ((is_pml and processes[i].pos_on_r <= -1) or
+                           (is_count and backward_search_finished) or
+                           (is_zml and processes[i].pos_on_r <= 0)) {
+                    // ZML closes its final matching length before the read is written,
+                    // the same bookkeeping as the mid-read case above.
+                    if (is_zml) {
+                        record_zml_match(processes[i]);
+                    }
+                    // Writing is the only part of finishing a read that touches state
+                    // shared between threads, so it is the only part that is serialized.
+                    // The lock is named so that it contends with other output, and not
+                    // with input claiming or classification. The progress line belongs
+                    // inside it: std::cerr is tied to std::cout, so emitting it flushes
+                    // std::cout, which must not happen while another thread is writing.
+                    #pragma omp critical(movi_output)
                     {
-                        if (read_processed % 1000 == 0) {
-                            QUERY_PROGRESS_MSG("Number of reads processed: " + format_number_with_commas(read_processed));
-                        }
-
-                        if (is_pml) {
-                            write_mls(processes[i]);
-                            reset_process(processes[i], reader);
-                        } else if (is_count) {
+                        report_progress();
+                        if (is_count) {
                             write_count(processes[i]);
-                            reset_process(processes[i], reader);
-                            reset_backward_search(processes[i]);
-                        } else if (is_zml) {
-                            if (backward_search_finished and processes[i].pos_on_r > 0) {
-                                processes[i].mq.add_ml(processes[i].match_len, mv.movi_options->write_stdout_enabled());
-                                if (mv.movi_options->is_get_sa_entries()) {
-                                    uint64_t sa_entry = mv.get_SA_entries(processes[i].idx, processes[i].offset);
-                                    processes[i].mq.add_sa_entries(sa_entry);
-                                }
-
-                                processes[i].pos_on_r -= 1;
-                                reset_backward_search(processes[i]);
-                                processes[i].kmer_end = processes[i].pos_on_r;
-                                // continue;
-                            } else if (processes[i].pos_on_r <= 0) {
-                                processes[i].mq.add_ml(processes[i].match_len, mv.movi_options->write_stdout_enabled());
-                                if (mv.movi_options->is_get_sa_entries()) {
-                                    uint64_t sa_entry = mv.get_SA_entries(processes[i].idx, processes[i].offset);
-                                    processes[i].mq.add_sa_entries(sa_entry);
-                                }
-
-                                write_mls(processes[i]);
-                                reset_process(processes[i], reader);
-                                reset_backward_search(processes[i]);
-                                processes[i].kmer_end = processes[i].pos_on_r;
-                            }
+                        } else {
+                            write_mls(processes[i]);
                         }
-                        // 3: -- check if it was the last read in the file -> finished_count++
-                        if (processes[i].finished) {
-                            finished_count += 1;
-                        }
+                    }
+
+                    // Fetching the next read works on this thread's own BatchLoader and
+                    // strand state, so it stays outside the lock.
+                    reset_process(processes[i], reader);
+                    if (is_count or is_zml) {
+                        reset_backward_search(processes[i]);
+                    }
+                    if (is_zml) {
+                        processes[i].kmer_end = processes[i].pos_on_r;
+                    }
+
+                    // 3: -- check if it was the last read in the file -> finished_count++
+                    if (processes[i].finished) {
+                        finished_count += 1;
                     }
                 } else {
                     // 4: big jump with prefetch
@@ -735,11 +753,9 @@ void ReadProcessor::process_latency_hiding_tally(BatchLoader& reader) {
     bool is_pml = mv.movi_options->is_pml();
 
     std::vector<Strand> processes;
-    uint64_t finished_count = 0;
-    #pragma omp critical
-    {
-        finished_count = initialize_strands(processes, reader);
-    }
+    // As in process_latency_hiding: strand state and the reader are thread-local, so
+    // setting up needs no synchronization.
+    uint64_t finished_count = initialize_strands(processes, reader);
 
     while (finished_count != strands) {
         for (uint64_t i = 0; i < strands; i++) {
@@ -749,15 +765,13 @@ void ReadProcessor::process_latency_hiding_tally(BatchLoader& reader) {
                 }
                 // 2: if the read is done -> Write the pmls and go to next read
                 if (is_pml and processes[i].pos_on_r <= -1) {
-                    #pragma omp critical
+                    // Only writing is shared; see process_latency_hiding.
+                    #pragma omp critical(movi_output)
                     {
-                        if (read_processed % 1000 == 0) {
-                            QUERY_PROGRESS_MSG("Number of reads processed: " + format_number_with_commas(read_processed));
-                        }
-
+                        report_progress();
                         write_mls(processes[i]);
-                        reset_process(processes[i], reader);
                     }
+                    reset_process(processes[i], reader);
                 }
                 // 3: -- check if it was the last read in the file -> finished_count++
                 if (processes[i].finished) {
