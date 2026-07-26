@@ -267,7 +267,16 @@ MoveBiInterval MoveStructure::initialize_bidirectional_search(MoveQuery& mq, int
 }
 
 MoveInterval MoveStructure::initialize_backward_search(MoveQuery& mq, int32_t& pos_on_r, uint64_t& match_len, bool rc) {
-    all_initializations += 1;
+    // all_initializations and no_ftab below are diagnostics, reported only under
+    // --debug. They live on the shared MoveStructure, so incrementing them on every
+    // call has all threads writing one cache line. ZML arrives here once per matching
+    // length, which makes that line, rather than any query work, the limit on how the
+    // query scales with threads. Update them only when they will be read, and
+    // atomically so the reported value is correct when they are.
+    if (movi_options->is_debug()) {
+        #pragma omp atomic
+        all_initializations += 1;
+    }
     // Initialize assuming that the character at pos_on_r exists in the alphabet
     size_t ftab_k = movi_options->get_ftab_k();
     if (movi_options->is_multi_ftab()) {
@@ -286,7 +295,8 @@ MoveInterval MoveStructure::initialize_backward_search(MoveQuery& mq, int32_t& p
     if (movi_options->is_multi_ftab() and ftab_k < movi_options->get_ftab_k()) {
         ftab_k += 2;
     }
-    if (pos_on_r >= ftab_k - 1) {
+    if (pos_on_r >= ftab_k - 1 and movi_options->is_debug()) {
+        #pragma omp atomic
         no_ftab += 1;
     }
     auto& query_seq = mq.query();
