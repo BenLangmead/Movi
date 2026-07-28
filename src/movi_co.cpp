@@ -315,10 +315,10 @@ read_awaitable get_next_read(SharedFastqReader& reader, coroutine_handle<>& hand
 }
 
 // Coroutine return type for query_pml_coroutine
-struct MoveStructure::query_pml_coroutine_return_type {
+struct MoveStructure::coroutine_task {
     struct promise_type {
-        query_pml_coroutine_return_type get_return_object() {
-            return query_pml_coroutine_return_type{coroutine_handle<promise_type>::from_promise(*this)};
+        coroutine_task get_return_object() {
+            return coroutine_task{coroutine_handle<promise_type>::from_promise(*this)};
         }
         suspend_always initial_suspend() { return {}; }
         suspend_always final_suspend() noexcept { return {}; }
@@ -339,23 +339,23 @@ struct MoveStructure::query_pml_coroutine_return_type {
     
     coroutine_handle<promise_type> coro;
     
-    query_pml_coroutine_return_type() : coro(nullptr) {}
-    query_pml_coroutine_return_type(coroutine_handle<promise_type> h) : coro(h) {}
+    coroutine_task() : coro(nullptr) {}
+    coroutine_task(coroutine_handle<promise_type> h) : coro(h) {}
     
     // Copy constructor - delete it since coroutine handles shouldn't be copied
-    query_pml_coroutine_return_type(const query_pml_coroutine_return_type& other) = delete;
+    coroutine_task(const coroutine_task& other) = delete;
     
     // Move constructor
-    query_pml_coroutine_return_type(query_pml_coroutine_return_type&& other) noexcept 
+    coroutine_task(coroutine_task&& other) noexcept 
         : coro(other.coro) {
         other.coro = nullptr;
     }
     
     // Copy assignment - delete it
-    query_pml_coroutine_return_type& operator=(const query_pml_coroutine_return_type& other) = delete;
+    coroutine_task& operator=(const coroutine_task& other) = delete;
     
     // Move assignment
-    query_pml_coroutine_return_type& operator=(query_pml_coroutine_return_type&& other) noexcept {
+    coroutine_task& operator=(coroutine_task&& other) noexcept {
         if (this != &other) {
             if (coro) {
                 if (!coro.done()) {
@@ -368,7 +368,7 @@ struct MoveStructure::query_pml_coroutine_return_type {
         return *this;
     }
     
-    ~query_pml_coroutine_return_type() { 
+    ~coroutine_task() { 
         if (coro) {
             if (!coro.done()) {
                 coro.destroy();
@@ -383,7 +383,7 @@ struct MoveStructure::query_pml_coroutine_return_type {
 };
 
 // Coroutine implementation that requests reads from shared reader
-MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutine(
+MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
     SharedFastqReader& reader, 
     coroutine_handle<>& my_handle_storage,
     int coroutine_id) {
@@ -612,7 +612,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_pml_coroutin
 // because the hardware prefetcher covers sequential rlbwt row access.
 // The skip scan also accumulates fw_count (= count of c in fw_before), replacing
 // the separate fw_interval.count(rlbwt) scan for the rc-end walk.
-MoveStructure::query_pml_coroutine_return_type MoveStructure::query_mem_coroutine(
+MoveStructure::coroutine_task MoveStructure::query_mem_coroutine(
     SharedFastqReader& reader,
     coroutine_handle<>& my_handle_storage,
     int coroutine_id) {
@@ -852,7 +852,7 @@ MoveStructure::query_pml_coroutine_return_type MoveStructure::query_mem_coroutin
 // points cannot live in called functions. One coroutine serves both modes via
 // count_mode. k-mer search uses plain (not bidirectional) backward search, so no
 // reverse-complement index is needed and the read is NOT reversed.
-MoveStructure::query_pml_coroutine_return_type MoveStructure::query_kmer_coroutine(
+MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
     SharedFastqReader& reader,
     coroutine_handle<>& my_handle_storage,
     int coroutine_id) {
@@ -1106,7 +1106,7 @@ void process_fastq(const string& fastq_file, const string& index_dir, int concur
     
     // Storage for coroutine handles waiting for reads
     std::vector<coroutine_handle<>> waiting_handles(concurrency);
-    std::vector<MoveStructure::query_pml_coroutine_return_type> coroutines;
+    std::vector<MoveStructure::coroutine_task> coroutines;
     coroutines.reserve(concurrency);
     
     // Initialize all coroutines - use move semantics
