@@ -95,6 +95,42 @@ if not shared or unmatched or bad:
 print("PASS: coroutine PML matches sequential exactly on the separator index (%d reads)"%len(shared))
 PY
 
+# Read ids, on headers that carry a description after the first whitespace. The two
+# paths derive the id with different code -- BatchLoader for strand/sequential,
+# FastqSource for the coroutine -- so the id is exactly where they can silently
+# disagree, and the id is written into the output. Headers without whitespace (as in
+# the fixtures used above) cannot expose such a disagreement, and the PML check above
+# strips the id before comparing, so neither of them would catch it.
+echo "[regression] [read-id] running both paths on descriptive headers ..."
+SIGIL=$(head -c 1 "$READS")
+if [ "$SIGIL" = "@" ]; then
+  awk 'NR%4==1 {print $0" len=150 desc"; next} {print}' "$READS" > "$WORK/desc_reads"
+else
+  awk '/^>/ {print $0" len=150 desc"; next} {print}' "$READS" > "$WORK/desc_reads"
+fi
+"$MV" query --index "$IDX" --read "$WORK/desc_reads" --pml --coroutine --stdout -s 8 -t 1 > "$WORK/desc.co"  2>/dev/null
+"$MV" query --index "$IDX" --read "$WORK/desc_reads" --pml             --stdout       -t 1 > "$WORK/desc.seq" 2>/dev/null
+
+python3 - "$WORK/desc.co" "$WORK/desc.seq" <<'PY'
+import sys
+def ids(path):
+    # Deliberately unstripped: trailing whitespace in an id is the defect under test.
+    return [l[1:].rstrip("\n") for l in open(path) if l.startswith(">")]
+co, seq = ids(sys.argv[1]), ids(sys.argv[2])
+if not co or not seq:
+    print("FAIL: read-id check produced no output"); sys.exit(1)
+bad = [i for i in set(co) | set(seq) if i != i.strip()]
+if bad:
+    print("FAIL: %d id(s) carry leading or trailing whitespace, e.g. %r" % (len(bad), bad[0]))
+    sys.exit(1)
+if sorted(co) != sorted(seq):
+    print("FAIL: coroutine and sequential disagree on read ids")
+    print("  only coroutine:  %r" % sorted(set(co) - set(seq))[:3])
+    print("  only sequential: %r" % sorted(set(seq) - set(co))[:3])
+    sys.exit(1)
+print("PASS: both paths derive identical whitespace-free ids (%d reads)" % len(co))
+PY
+
 # MEM and plain k-mer presence are also routed through the coroutine (movi.cpp
 # dispatch), both via the shared output_mems / output_kmers emitters. Their per-read
 # content must be byte-identical to the sequential path. These are compared in file
