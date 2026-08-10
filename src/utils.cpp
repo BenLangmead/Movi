@@ -198,7 +198,7 @@ void read_thresholds(std::string tmp_filename, std::vector<uint64_t>& thresholds
 }
 
 template <typename T>
-void output_binary(const std::vector<T>& matching_lengths, std::ofstream& mls_file) {
+void output_binary(const std::vector<T>& matching_lengths, std::ostream& mls_file) {
 
     uint64_t matching_lengths_size = matching_lengths.size();
     mls_file.write(reinterpret_cast<const char*>(&matching_lengths_size), sizeof(matching_lengths_size));
@@ -207,14 +207,20 @@ void output_binary(const std::vector<T>& matching_lengths, std::ofstream& mls_fi
 
 }
 
-void output_base_stats(DataType data_type, bool to_stdout, std::ofstream& output_file, MoveQuery& mq) {
+void output_base_stats(DataType data_type, bool to_stdout, std::ostream& output_file, MoveQuery& mq) {
 
     if (to_stdout and data_type == DataType::match_length) {
 
-        std::cout << ">" << mq.get_query_id() << "\n";
+        // Write the text form to the PROVIDED stream, not a hard-coded std::cout, so
+        // the destination is the caller's choice: sequential/strand callers pass
+        // std::cout for stdout mode, while the coroutine path formats into an
+        // ostringstream so the result flows through its in-order reorder buffer
+        // (writing straight to std::cout here would bypass that buffer and emit in
+        // completion order).
+        output_file << ">" << mq.get_query_id() << "\n";
         std::reverse(mq.get_matching_lengths_string().begin(), mq.get_matching_lengths_string().end());
-        std::cout << mq.get_matching_lengths_string();
-        std::cout << "\n";
+        output_file << mq.get_matching_lengths_string();
+        output_file << "\n";
 
     } else {
 
@@ -243,7 +249,7 @@ void output_base_stats(DataType data_type, bool to_stdout, std::ofstream& output
     }
 }
 
-void output_counts(bool to_stdout, std::ofstream& count_file, size_t query_length, int32_t pos_on_r, uint64_t match_count, MoveQuery& mq) {
+void output_counts(bool to_stdout, std::ostream& count_file, size_t query_length, int32_t pos_on_r, uint64_t match_count, MoveQuery& mq) {
     if (to_stdout) {
         std::cout << mq.get_query_id() << "\t";
         std::cout << query_length - pos_on_r << "/" << query_length << "\t" << match_count << "\n";
@@ -271,7 +277,7 @@ size_t count_invalid_kmer_windows(const std::string& s, size_t k) {
     return invalid;
 }
 
-void output_kmers(bool to_stdout, std::ofstream& kmer_file, size_t all_kmer_count,
+void output_kmers(bool to_stdout, std::ostream& kmer_file, size_t all_kmer_count,
                   MoveQuery& mq, MoviOptions& movi_options) {
     std::ostream& out = to_stdout ? static_cast<std::ostream&>(std::cout)
                                   : static_cast<std::ostream&>(kmer_file);
@@ -337,7 +343,7 @@ void print_query_stats(MoviOptions& movi_options, uint64_t total_ff_count, MoveS
     }
 }
 
-void output_mems(bool to_stdout, std::ofstream& mems_file, MoveQuery& mq) {
+void output_mems(bool to_stdout, std::ostream& mems_file, MoveQuery& mq) {
     if (to_stdout) {
         for (auto& mem : mq.get_mems()) {
             std::cout << mq.get_query_id() << "\t" << mem.start << "\t" << mem.end << "\t" << mem.count << "\n";

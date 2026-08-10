@@ -1,7 +1,9 @@
 #include <cstdint>
 #include <stdio.h>
 #include <cstdio>
+#include <cstdlib>
 #include <chrono>
+#include <iostream>
 #include <cstddef>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -16,8 +18,10 @@
 #include "read_processor.hpp"
 #include "movi_options.hpp"
 #include "movi_parser.hpp"
+#include "coroutine_processor.hpp"
 #include "classifier.hpp"
 #include "batch_loader.hpp"
+#include "mmap_batch_source.hpp"
 
 // Function to handle PML/ZML processing for a single read
 uint64_t handle_pml_zml(MoveQuery& mq, MoviOptions& movi_options,
@@ -30,15 +34,21 @@ uint64_t handle_pml_zml(MoveQuery& mq, MoviOptions& movi_options,
         ff_count += mv_.query_zml(mq);
     }
 
-    #pragma omp critical
-    {
-        if (movi_options.is_classify()) {
-            std::vector<uint16_t> matching_lens_16(mq.get_matching_lengths().begin(), mq.get_matching_lengths().end());
-            // Classification with 32 bits pmls works if the pml values are less than 2^16.
+    // Classification and output are separate shared resources, so they take separate
+    // named locks and a run that does neither takes none at all. An unnamed `omp
+    // critical` would put both of them, and the input claim, on one process-wide lock.
+    if (movi_options.is_classify()) {
+        std::vector<uint16_t> matching_lens_16(mq.get_matching_lengths().begin(), mq.get_matching_lengths().end());
+        // Classification with 32 bits pmls works if the pml values are less than 2^16.
+        bool found = false;
+        #pragma omp critical(movi_classify)
+        {
+            found = classifier.classify(mq.get_query_id(), matching_lens_16, movi_options);
+        }
 
-            bool found = classifier.classify(mq.get_query_id(), matching_lens_16, movi_options);
-
-            if (movi_options.is_filter() && !movi_options.is_no_output()) {
+        if (movi_options.is_filter() && !movi_options.is_no_output()) {
+            #pragma omp critical(movi_output)
+            {
                 if (found && !movi_options.is_invert()) {
                     output_read(mq);
                 } else if (!found && movi_options.is_invert()) {
@@ -46,9 +56,15 @@ uint64_t handle_pml_zml(MoveQuery& mq, MoviOptions& movi_options,
                 }
             }
         }
+    }
 
-        if (movi_options.write_output_allowed()) {
-            output_base_stats(DataType::match_length, movi_options.write_stdout_enabled(), output_files.mls_file, mq);
+    if (movi_options.write_output_allowed()) {
+        #pragma omp critical(movi_output)
+        {
+            std::ostream& mls_dest = movi_options.write_stdout_enabled()
+                ? static_cast<std::ostream&>(std::cout)
+                : static_cast<std::ostream&>(output_files.mls_file);
+            output_base_stats(DataType::match_length, movi_options.write_stdout_enabled(), mls_dest, mq);
 
             if (movi_options.is_get_sa_entries()) {
                 output_base_stats(DataType::sa_entry, movi_options.write_stdout_enabled(), output_files.sa_entries_file, mq);
@@ -68,7 +84,7 @@ void handle_count(MoveQuery& mq, MoviOptions& movi_options,
     uint64_t match_count = mv_.query_backward_search(mq, pos_on_r);
 
     if (movi_options.write_output_allowed()) {
-        #pragma omp critical
+        #pragma omp critical(movi_output)
         {
             output_counts(movi_options.write_stdout_enabled(), output_files.matches_file, mq.query().length(), pos_on_r, match_count, mq);
         }
@@ -87,20 +103,19 @@ void handle_kmer(MoveQuery& mq, MoviOptions& movi_options,
         size_t L = mq.query().length();
         size_t total = (L >= k) ? (L - k + 1) : 0;
         size_t invalid = count_invalid_kmer_windows(mq.query(), k);
-        #pragma omp atomic
-        mv_.kmer_stats.agg_num_kmers += total;
-        #pragma omp atomic
-        mv_.kmer_stats.agg_invalid += invalid;
-        #pragma omp atomic
-        mv_.kmer_stats.agg_positive += mq.found_kmer_count;
+        // Accumulated per thread and merged once the query is over, like the rest of
+        // the k-mer tallies, so threads do not contend for these cache lines.
+        KmerStatistics& ks = mv_.thread_kmer_stats();
+        ks.agg_num_kmers += total;
+        ks.agg_invalid += invalid;
+        ks.agg_positive += mq.found_kmer_count;
     }
 
-    // Emit per-k-mer output in both presence and count modes.  (Count mode now
-    // populates the same per-k-mer string via add_kmer, so it is no longer
-    // suppressed here.)  The sshash format suppresses per-read lines (handled in
-    // output_kmers) and prints its aggregate report once at the end.
+    // Emit per-k-mer output in both presence and count modes; count mode populates
+    // the same per-k-mer string via add_kmer.  The sshash format suppresses per-read
+    // lines (handled in output_kmers) and prints its aggregate report once at the end.
     if (movi_options.write_output_allowed()) {
-        #pragma omp critical
+        #pragma omp critical(movi_output)
         {
             output_kmers(movi_options.write_stdout_enabled(), output_files.kmer_file,
                          mq.query().length() - movi_options.get_k() + 1, mq, movi_options);
@@ -113,7 +128,7 @@ void handle_mem(MoveQuery& mq, MoviOptions& movi_options,
                 MoveStructure& mv_, OutputFiles& output_files) {
     mv_.query_mems(mq);
     if (movi_options.write_output_allowed()) {
-        #pragma omp critical
+        #pragma omp critical(movi_output)
         {
             output_mems(movi_options.write_stdout_enabled(), output_files.mems_file, mq);
         }
@@ -238,9 +253,78 @@ void color(MoveStructure& mv_, MoviOptions& movi_options) {
 
 void query(MoveStructure& mv_, MoviOptions& movi_options) {
 
+    // The ftab accelerates MEM and k-mer queries (it only accelerates -- results are
+    // ftab-independent), and the deepest applicable ftab is fastest. So when the user
+    // runs `movi query --mem` or `--kmer` without an explicit --ftab-k, auto-select the
+    // deepest ftab.<k>.bin in the index that fits the query, giving fast queries by
+    // default without the user needing to know which depths were built.
+    //
+    // Cap on the ftab depth (a longer ftab over-extends the seed and is wrong/unusable):
+    //   - MEM (length-thresholded, BML): ftab-k <= --min-mem-length; ftab-k ==
+    //     min-mem-length is ideal (whole seed in one lookup). all-MEM (min-mem <= 1) is
+    //     uncapped.
+    //   - k-mer: ftab-k <= k; ftab-k == k resolves the whole k-mer in one lookup.
+    // An explicit --ftab-k is validated against the same caps below.
+    if (movi_options.get_ftab_k() == 0 && (movi_options.is_mem() || movi_options.is_kmer())) {
+        uint32_t cap = std::numeric_limits<uint32_t>::max();
+        std::string what = "query";
+        if (movi_options.is_mem()) {
+            const uint32_t mm = movi_options.get_min_mem_length();
+            if (mm > 1) cap = mm;
+            what = "MEM";
+        } else {
+            cap = static_cast<uint32_t>(movi_options.get_k());
+            what = "k-mer";
+        }
+        uint32_t best = 0;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(movi_options.get_index_dir(), ec)) {
+            const std::string name = entry.path().filename().string();
+            // Match "ftab.<k>.bin" with a numeric k (skip e.g. ftab.chosen.k).
+            if (name.rfind("ftab.", 0) == 0 && name.size() > 9 &&
+                name.compare(name.size() - 4, 4, ".bin") == 0) {
+                const std::string kstr = name.substr(5, name.size() - 9);
+                if (!kstr.empty() && std::all_of(kstr.begin(), kstr.end(), ::isdigit)) {
+                    uint32_t fk = static_cast<uint32_t>(std::stoul(kstr));
+                    if (fk > best && fk <= cap) best = fk;
+                }
+            }
+        }
+        if (best > 1) {
+            movi_options.set_ftab_k(best);
+            INFO_MSG(what + ": auto-selected ftab-k=" + std::to_string(best) +
+                     " (deepest ftab that fits the query).");
+        }
+    }
+
+    // Reject an explicit --ftab-k longer than the k-mer length (a longer ftab looks up a
+    // k-mer longer than the query, over-constraining the seed).
+    if (movi_options.is_kmer() && movi_options.get_ftab_k() != 0 &&
+        movi_options.get_ftab_k() > static_cast<uint32_t>(movi_options.get_k())) {
+        throw std::runtime_error(ERROR_MSG("For k-mer queries, --ftab-k (" +
+            std::to_string(movi_options.get_ftab_k()) + ") must not exceed k (" +
+            std::to_string(movi_options.get_k()) + "). Use --ftab-k <= k (ftab-k == k resolves the "
+            "whole k-mer in one lookup)."));
+    }
+
     if (movi_options.get_ftab_k() != 0) {
         mv_.read_ftab();
         INFO_MSG("Ftab was read!");
+    }
+
+    // Counting with the k-mer bitvector resolves each present k-mer with a
+    // predecessor/successor lookup instead of a per-k-mer backward search, so it is
+    // faster and its lead grows with k (about 2x at k=31 and 3x at k=63 on ecoli100),
+    // for byte-identical counts. It needs the per-k kmerbv.<k>.* structures, so point
+    // the user at it only when this index already has them for the k being queried.
+    if (movi_options.is_kmer_count() && !movi_options.is_kmer_bv()) {
+        const std::string bv_meta = movi_options.get_index_dir() + "/kmerbv." +
+                                    std::to_string(movi_options.get_k()) + ".meta";
+        if (std::filesystem::exists(bv_meta)) {
+            INFO_MSG("This index has a k-mer bitvector for k=" +
+                     std::to_string(movi_options.get_k()) +
+                     "; adding --kmer-bv counts faster with identical output.");
+        }
     }
 
 #if TALLY_MODES
@@ -256,11 +340,16 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
             WARNING_MSG("MEM finding does not support prefetching. Continuing with prefetching disabled.");
         }
         if (movi_options.get_ftab_k() == 0) {
-            throw std::runtime_error(ERROR_MSG("MEM finding requires ftab. Please build the ftab using the ./movi ftab --ftab-k <k>, then pass --ftab-k <k> to the query step."));
-        } else {
-            if (movi_options.get_min_mem_length() > movi_options.get_ftab_k()) {
-                WARNING_MSG("Setting minimum MEM (length " + std::to_string(movi_options.get_min_mem_length()) + ") greater than ftab k (" + std::to_string(movi_options.get_ftab_k()) + ") causes a slower MEM search.");
-            }
+            throw std::runtime_error(ERROR_MSG("MEM finding requires an ftab, but none was found in the index. Build one with `movi ftab --ftab-k 12` (a deeper ftab means faster MEM search; ftab-12 is recommended). It is then auto-selected, or pass --ftab-k <k> explicitly."));
+        } else if (movi_options.get_min_mem_length() > 1 &&
+                   movi_options.get_ftab_k() > movi_options.get_min_mem_length()) {
+            // ftab-k must not exceed min-mem-length for the BML search; a longer ftab
+            // over-extends the seed left of the intended MEM start. (Auto-select already
+            // caps at min-mem-length; this catches an explicit, out-of-range --ftab-k.)
+            throw std::runtime_error(ERROR_MSG("For length-thresholded MEM search, --ftab-k (" +
+                std::to_string(movi_options.get_ftab_k()) + ") must not exceed --min-mem-length (" +
+                std::to_string(movi_options.get_min_mem_length()) + "). A longer ftab over-extends the seed; "
+                "use --ftab-k <= min-mem-length (ftab-k == min-mem-length is fastest)."));
         }
     }
 
@@ -277,17 +366,81 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
     std::ifstream input_file;
     setup_input_file(input_file, movi_options.get_read_file());
 
+    // Maps the input when it is a raw regular FASTA/FASTQ file, so the batch loops below
+    // serialize only a record-boundary claim and build their batches in the worker
+    // thread. It reports is_mmap() == false for gzip, stdin and pipes, and those keep
+    // reading input_file under the lock.
+    MmapBatchSource batch_source(movi_options.get_read_file());
+
     OutputFiles output_files;
     open_output_files(movi_options, output_files);
     mv_.set_output_files(&output_files);
 
+#if (MODE == 6 || MODE == 7 || MODE == 8) && COLOR_MODE == 0
+    // Coroutine latency-hiding dispatch (threshold index modes, non-color only). Route
+    // the queries whose coroutine output is byte-identical to the sequential path:
+    // PML, MEM, and every k-mer query except the MPHF-id lookup. Among k-mer queries
+    // that is presence (F,F), plain count (T,F), and bitvector count (T,T); only the
+    // MPHF-id query (--kmer --kmer-bv, i.e. bv without count) is excluded, since it has
+    // no coroutine implementation and falls through to the sequential path. ZML and
+    // exact-count also fall through, having no coroutine variant.
+    if (movi_options.is_coroutine()) {
+        const bool coroutine_routable =
+            movi_options.is_pml() || movi_options.is_mem() ||
+            (movi_options.is_kmer() && !(movi_options.is_kmer_bv() && !movi_options.is_kmer_count()));
+        if (coroutine_routable) {
+            CoroutineQueryOptions copts;
+            copts.mem_query      = movi_options.is_mem();
+            copts.kmer_query     = movi_options.is_kmer();
+            copts.ordered_output = true;  // emit in input order, matching the sequential path
+            // k, ftab_k, min-mem-length and count/bv mode are read from mv_'s MoviOptions
+            // by the coroutine bodies, so they need not be copied into CoroutineQueryOptions.
+            std::ostream& dest = movi_options.is_mem()  ? output_files.mems_file
+                               : movi_options.is_kmer() ? output_files.kmer_file
+                                                        : output_files.mls_file;
+            run_coroutine_query(mv_, movi_options.get_read_file(),
+                                static_cast<int>(movi_options.get_strands()),
+                                static_cast<int>(movi_options.get_threads()), copts,
+                                movi_options.write_stdout_enabled() ? std::cout : dest);
+            close_output_files(movi_options, output_files);
+            return;
+        }
+        // --coroutine was requested for a query the coroutine engine cannot reproduce
+        // byte-identically; warn so a benchmark does not silently attribute sequential
+        // timings to the coroutine path.
+        std::cerr << "[movi] note: --coroutine has no coroutine implementation for this query "
+                     "(MPHF-id --kmer --kmer-bv, ZML, or exact count); running the sequential "
+                     "path instead." << std::endl;
+    }
+#else
+    if (movi_options.is_coroutine()) {
+        std::cerr << "[movi] note: --coroutine latency hiding is only implemented for the "
+                     "threshold index modes (regular-, sampled-, or blocked-thresholds, non-color); "
+                     "running the sequential path instead." << std::endl;
+    }
+#endif
+
     uint64_t total_ff_count = 0;
+
+    // One k-mer tally per thread for the duration of the query; merged into
+    // mv_.kmer_stats below, before anything reports it.
+    mv_.prepare_kmer_stats();
 
     auto begin = std::chrono::system_clock::now();
 
     if (!movi_options.no_prefetch()) {
 
         ReadProcessor rp(mv_, movi_options.get_strands(), movi_options.is_verbose(), movi_options.is_reverse(), output_files, classifier);
+
+        // Reads claimed per strand batch (the per-thread work-claim granularity for the
+        // strand scheduler). Default 4*strands; MOVI_STRAND_BATCH overrides it for
+        // benchmarking the batch-size vs load-balance tradeoff, mirroring MOVI_CO_BATCH
+        // on the coroutine path.
+        size_t strand_batch_reads = 4 * movi_options.get_strands();
+        if (const char* e = std::getenv("MOVI_STRAND_BATCH")) {
+            long v = std::atol(e);
+            if (v > 0) strand_batch_reads = static_cast<size_t>(v);
+        }
 
 #pragma omp parallel
         {
@@ -296,25 +449,38 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
             // Iterates over batches of data until none left
             while (true) {
                 bool valid_batch = true;
-                #pragma omp critical // one reader at a time
-                {
-                    valid_batch = reader.loadBatch(input_file, 1000, 4*movi_options.get_strands());
+                // With a mapped input only the record-boundary claim is serialized and the
+                // batch is built in this thread; otherwise the whole parse stays under the
+                // lock, as it must for gzip and stdin.
+                if (batch_source.is_mmap()) {
+                    const char* p = nullptr; const char* e = nullptr;
+                    #pragma omp critical(movi_input) // one claimer at a time
+                    {
+                        valid_batch = batch_source.claim(p, e, 1000, strand_batch_reads);
+                    }
+                    if (!valid_batch) {
+                        break;
+                    }
+                    reader.loadBatchFromRange(p, e, batch_source.format());
+                } else {
+                    #pragma omp critical(movi_input) // one reader at a time
+                    {
+                        valid_batch = reader.loadBatch(input_file, 1000, strand_batch_reads);
+                    }
+                    if (!valid_batch) {
+                        break;
+                    }
                 }
-                if (!valid_batch) {
-                    break;
-                }
 
-                if (movi_options.is_pml() or movi_options.is_zml() or movi_options.is_count()) {
-
-
+                // The strand scheduler serves PML, ZML and whole-read exact-count. k-mer
+                // and MEM are not routed here: the k-mer query flags turn prefetching off
+                // in the parser, so a k-mer query reaches the sequential path below, and
+                // its latency-hiding variant is the coroutine one dispatched above.
 #if TALLY_MODES
-                    rp.process_latency_hiding_tally(reader);
+                rp.process_latency_hiding_tally(reader);
 #else
-                    rp.process_latency_hiding(reader);
+                rp.process_latency_hiding(reader);
 #endif
-                } else if (movi_options.is_kmer()) {
-                    rp.kmer_search_latency_hiding(movi_options.get_k(), reader);
-                }
             }
         }
 
@@ -326,7 +492,9 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
 
     } else {
         if (!movi_options.is_kmer()) {
-            // For kmer queries, latency hiding is disabled by default.
+            // k-mer queries always arrive here (the parser turns prefetching off for
+            // them), so the message would be noise; it is meant for a query that could
+            // have used the strand scheduler but was asked not to.
             INFO_MSG("Latency hiding is disabled...");
         }
 
@@ -339,12 +507,22 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
             // Iterates over batches of data until none left
             while (true) {
                 bool valid_batch = true;
-                #pragma omp critical // one reader at a time
-                {
-                    valid_batch = reader.loadBatch(input_file, 1000, 1);
+                if (batch_source.is_mmap()) {
+                    const char* p = nullptr; const char* e = nullptr;
+                    #pragma omp critical(movi_input) // one claimer at a time
+                    {
+                        valid_batch = batch_source.claim(p, e, 1000, 1);
+                    }
+                    if (!valid_batch) break;
+                    reader.loadBatchFromRange(p, e, batch_source.format());
+                } else {
+                    #pragma omp critical(movi_input) // one reader at a time
+                    {
+                        valid_batch = reader.loadBatch(input_file, 1000, 1);
+                    }
+                    if (!valid_batch) break;
                 }
-                if (!valid_batch) break;
-                
+
                 Read read_struct;
                 bool valid_read = false;
 
@@ -353,13 +531,17 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                     valid_read = reader.grabNextRead(read_struct);
                     if (!valid_read) break;
 
-                    #pragma omp atomic
-                    read_processed += 1 ;
+                    uint64_t processed = 0;
+                    #pragma omp atomic capture
+                    processed = ++read_processed;
 
-                    #pragma omp critical
-                    {
-                        if (read_processed % 1000 == 0) {
-                            QUERY_PROGRESS_MSG("Number of reads processed: " + format_number_with_commas(read_processed));
+                    // The counter is atomic, so no lock is needed to read it, but the
+                    // message itself is output: std::cerr is tied to std::cout, so
+                    // emitting it flushes std::cout and must not race another writer.
+                    if (processed % 1000 == 0) {
+                        #pragma omp critical(movi_output)
+                        {
+                            QUERY_PROGRESS_MSG("Number of reads processed: " + format_number_with_commas(processed));
                         }
                     }
 
@@ -390,7 +572,7 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
 
                     if (movi_options.is_logs()) {
                         if (movi_options.write_output_allowed()) {
-                            #pragma omp critical
+                            #pragma omp critical(movi_output)
                             {
                                 output_logs(output_files.costs_file, output_files.scans_file, output_files.fastforwards_file, mq);
                             }
@@ -405,6 +587,9 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
     auto end = std::chrono::system_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
     TIMING_MSG(elapsed, "processing the reads");
+
+    // Fold the per-thread k-mer tallies together before any of them are reported.
+    mv_.merge_kmer_stats();
 
     if (movi_options.write_output_allowed()) {
         print_query_stats(movi_options, total_ff_count, mv_);

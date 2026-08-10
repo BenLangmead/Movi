@@ -27,6 +27,7 @@ class MoviOptions {
         bool is_thresholds() { return thresholds; }
         bool is_mmap() { return mmap; }
         bool no_prefetch() { return !prefetch; }
+        bool is_coroutine() { return coroutine; }
         bool is_no_output() { return no_output; }
         bool is_small_pml_lens() { return small_pml_lens; }
         bool is_large_pml_lens() { return large_pml_lens; }
@@ -178,6 +179,7 @@ class MoviOptions {
         void set_use_separators(bool separators_) { separators = separators_; }
         void set_mmap(bool mmap_) { mmap = mmap_; }
         void set_prefetch(bool prefetch_) { prefetch = prefetch_; }
+        void set_coroutine(bool c) { coroutine = c; }
         void set_threads(size_t threads_) { threads = threads_; }
         void set_strands(size_t strands_) { strands = strands_; }
         void set_command(std::string command_) { command = command_; }
@@ -289,6 +291,7 @@ class MoviOptions {
         bool reverse = false;
         bool mmap = false;
         bool prefetch = true;
+        bool coroutine = false;   // C++20 coroutine latency hiding (mode-6 PML/MEM/k-mer)
         size_t strands = 16;
         size_t threads = 1;
         uint32_t k = 31;

@@ -26,11 +26,9 @@ struct Strand {
     int find_next_id_attempt;
 #endif
 
-    bool kmer_extension;
     bool finished;
     int32_t pos_on_r;
-    uint32_t kmer_end;
-    int32_t kmer_start;
+    uint32_t kmer_end;   // end position of the current backward search (ZML)
     uint64_t length_processed;
 
     uint64_t idx;
@@ -62,7 +60,6 @@ class ReadProcessor {
         void process_latency_hiding(BatchLoader& reader);
         // void ziv_merhav_latency_hiding();
         // void backward_search_latency_hiding();
-        void kmer_search_latency_hiding(uint32_t k, BatchLoader& reader);
         bool next_read(Strand& process, BatchLoader& reader);
         void write_mls(Strand& process);
         void compute_match_count(Strand& process);
@@ -72,10 +69,8 @@ class ReadProcessor {
         bool backward_search(Strand& process, uint64_t end_pos);
         void reset_process(Strand& process, BatchLoader& reader);
         void reset_backward_search(Strand& process);
-        void reset_kmer_search(Strand& process, BatchLoader& reader);
-        void next_kmer_search(Strand& process);
-        void next_kmer_search_negative_skip_all_heuristic(Strand& process, BatchLoader& reader);
-        bool verify_kmer(Strand& process, uint64_t k);
+        void record_zml_match(Strand& process);
+        void report_progress();
 
 #if TALLY_MODES
         void process_char_tally(Strand& process);
@@ -92,16 +87,9 @@ class ReadProcessor {
         int l;
         OutputFiles& output_files;
         int strands;
-        uint32_t k;
         bool verbose = false;
         bool reverse = false;
         uint64_t read_processed;
-        uint64_t total_kmer_count;
-        uint64_t positive_kmer_count;
-        uint64_t negative_kmer_count;
-        uint64_t kmer_extension_count;
-        uint64_t kmer_extension_stopped_count;
-        uint64_t negative_kmer_extension_count;
         uint64_t total_ff_count;
         std::chrono::time_point<std::chrono::high_resolution_clock> t1;
 };

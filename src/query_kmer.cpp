@@ -4,259 +4,13 @@
 #include "move_structure.hpp"
 #include "utils.hpp"
 
-std::ostringstream dbg;
-
 // IMPORTANT: The index has to be built on a reference with separators to get the correct kmer counts
 // IMPORTANT: For the bidirectional search, also the index has to be built with the separators
 
-// pos_on_r points to the furthest (to the right) base of the kmer to be searched
-// The search is from the right end of the kmer
-// All kmers on the right side of the kmer_middle might be found in this call if they exist
-uint64_t MoveStructure::query_kmers_from_bidirectional(MoveQuery& mq, int32_t& pos_on_r) {
-
-    uint64_t kmers_found = 0;
-    int32_t last_kmer_looked_at = pos_on_r;
-
-    size_t ftab_k = movi_options->get_ftab_k();
-    size_t k = movi_options->get_k();
-    auto& query_seq = mq.query();
-
-    // To remember the kmer which initiated the search
-    int32_t pos_on_r_saved = pos_on_r;
-    // The number of bases matched so far
-    uint64_t match_len = 0;
-    // The position of the left side of the kmer on the read
-    int32_t kmer_left = pos_on_r - k + 1;
-    // The position on the right side of the match to be found by ftab
-    int32_t ftab_right = kmer_left + ftab_k - 1;
-
-    // At the time, the initialization works if ftab with ftab_k exists only
-    // And the multi-ftab strategy must be turned off
-    movi_options->set_multi_ftab(false);
-
-    MoveBiInterval bi_interval;
-    int32_t ftab_right_initialize = ftab_right;
-
-    bi_interval = initialize_bidirectional_search(mq, ftab_right_initialize, match_len);
-
-    if (match_len == 0 and ftab_k > 1) {
-        // If the ftab-k-mer at the end of the read is not found,
-        // we can skip all the kmers until ftab_right - 1
-        #pragma omp atomic
-        kmer_stats.initialize_skipped += (pos_on_r - ftab_right + 1);
-        pos_on_r = ftab_right - 1;
-        return 0;
-    }
-
-    if (ftab_right_initialize != kmer_left) {
-        // Sanity check: to make sure ftab and initialization is working
-        throw std::runtime_error(ERROR_MSG("[Sequitur - query kmers from bidirectional] " +
-                                           "ftab_right_initialize is now updated and should have been equal to kmer_left.\n" +
-                                           "ftab_right: " + std::to_string(ftab_right) +
-                                           "\tftab_right_initialize:" + std::to_string(ftab_right_initialize) +
-                                           "\tkmer_left:" + std::to_string(kmer_left) + "\n"));
-    }
-
-    // pos_on_r and pos_on_r_saved point to the beginning of the kmer for which the bidirectional initialization was performed above
-    // Extend to right until the kmer is found and save the observed intervals beyond k/2
-    // The middle point of the kmer
-    int32_t partial_count = k/2;
-    int32_t non_extension_count = k - partial_count;
-    int32_t kmer_middle = pos_on_r_saved - partial_count;
-    std::vector<MoveBiInterval> partial_matches;
-    if (partial_count > 0) {
-        partial_matches.resize(partial_count - 1); // -1 is because the last kmer is the one found by bidirectional
-    }
-    int32_t partial_saved_count = 0;
-
-    // kmer_right is the last position matched so far
-    uint64_t kmer_right = ftab_right;
-
-    while (kmer_right < pos_on_r_saved) {
-        // The next k-mer we are looking at, ends at next_pos
-        int next_pos = kmer_right + 1;
-
-        if (movi_options->is_debug() and next_pos >= k)
-            dbg << "\nkmer at " << next_pos << ": " << query_seq.substr(next_pos - k + 1, k) << " ";
-
-        bool extend_right_res = extend_right(query_seq[next_pos], bi_interval);
-
-        if (!extend_right_res) {
-            // The kmer was not found, we can skip kmers until kmer_right
-            #pragma omp atomic
-            kmer_stats.right_extension_failed += pos_on_r_saved - kmer_right; // b += pos_on_r_saved - kmer_right;
-            pos_on_r = kmer_right;
-            last_kmer_looked_at = next_pos;
-
-            // Printing all the kmers being skipped, because the extension to the right was not possible
-            if (movi_options->is_debug()) {
-                int j = next_pos + 1;
-                while (j < pos_on_r_saved) {
-                    if (j > k)
-                        dbg << "\nkmer at " << j << ": " << query_seq.substr(j - k + 1, k) << "-";
-                    j += 1;
-                }
-            }
-
-            // It's important to break here, to avoid false extensions in the following iterations
-            break;
-        } else {
-            match_len += 1;
-            kmer_right = next_pos; // increaments kmer_right one position to the right
-
-            // pos_on_r always points to the right end of the right most kmer
-            pos_on_r = kmer_right;
-
-            if (match_len != bi_interval.match_len) {
-                // Sanity check: to make sure match_len is computed correctly
-                throw std::runtime_error(ERROR_MSG("[Sequitur - query kmers from bidirectional] The interval's match_len is not set correctly.\n" +
-                                                   "bi_interval.match_len: " + std::to_string(bi_interval.match_len) +
-                                                   " match_len: " + std::to_string(match_len) + "\n"));
-            }
-
-            // store the intervals for matches beyond half point of the kmer
-            if (kmer_right > kmer_middle and kmer_right != pos_on_r_saved) {
-
-                if (bi_interval.match_len - non_extension_count - 1 >= partial_matches.size()) {
-                    throw std::runtime_error(ERROR_MSG("[Sequitur - query kmers from bidirectional] The interval's match_len is not set correctly.\n" +
-                                                       "bi_interval.match_len: " + std::to_string(bi_interval.match_len) +
-                                                       " non_extension_count: " + std::to_string(non_extension_count) +
-                                                       "partial_matches.size(): " + std::to_string(partial_matches.size()) + "\n"));
-                }
-
-                if (partial_saved_count != bi_interval.match_len - non_extension_count - 1) {
-                    // Sanity check
-                    throw std::runtime_error(ERROR_MSG("[Sequitur - query kmers from bidirectional] Partial saved count is not set correctly.\n" +
-                                                       "partial_saved_count: " + std::to_string(partial_saved_count) +
-                                                       " bi_interval.match_len: " + std::to_string(bi_interval.match_len) +
-                                                       " non_extension_count: " + std::to_string(non_extension_count) + "\n"));
-                }
-
-                partial_matches[bi_interval.match_len - non_extension_count - 1] = bi_interval;
-                partial_saved_count += 1;
-            }
-        }
-    }
-
-    if (kmer_right == pos_on_r_saved) {
-        // The kmer at pos_on_r was found by k bidirectional backward search
-        kmers_found += 1; // a += 1;
-        uint64_t kmers_count = bi_interval.fw_interval.count(rlbwt);
-        #pragma omp atomic
-        kmer_stats.total_counts += kmers_count;
-        if (pos_on_r != pos_on_r_saved) {
-            // pos_on_r should be equal to pos_on_r_saved at this point
-            throw std::runtime_error(ERROR_MSG("[Sequitur - query kmers from bidirectional] Pos_on_r is not equal to pos_on_r_saved.\n" +
-                                               "pos_on_r: " + std::to_string(pos_on_r) +
-                                               " pos_on_r_saved: " + std::to_string(pos_on_r_saved) + "\n"));
-        }
-
-        // To avoid searching this kmer again in the next step
-        kmer_right -= 1;
-        pos_on_r = kmer_right;
-
-        if (movi_options->is_debug()) {
-            if (pos_on_r_saved > k)
-                dbg << "\nkmer at " << pos_on_r_saved << ": " << query_seq.substr(pos_on_r_saved - k + 1, k) << "\n";
-            dbg << "1";
-        }
-    } else {
-        if (movi_options->is_debug()) {
-            if (pos_on_r_saved > k)
-                dbg << "\nkmer at " << pos_on_r_saved << ": " << query_seq.substr(pos_on_r_saved - k + 1, k) << "-\n";
-            dbg << "0";
-        }
-    }
-
-
-    // Use partial matches for finding other overlapping kmers (until half point)
-    if (kmer_right > kmer_middle) {
-        if (movi_options->is_debug()) {
-            for (int i = kmer_right + 1; i < pos_on_r_saved; i++) {
-                dbg << "0";
-            }
-        }
-
-        int skip_kmers = 0;
-        int partial_found = 0;
-
-        for (int i = 0; i < partial_saved_count; i += (skip_kmers + 1) ) {
-            // Set kmer_left_ext to be the last match position on the left end
-            int32_t kmer_left_ext = kmer_left;
-            auto& partial_match_interval = partial_matches[i];
-
-            kmer_right = kmer_middle + 1 + i;
-            last_kmer_looked_at = kmer_right; // not used
-
-            while (partial_match_interval.match_len < k and kmer_left_ext > 0) {
-                // We don't need to do bidirectional left extension here, simple backward search is enough
-                bool res = backward_search_step(query_seq[kmer_left_ext - 1], partial_match_interval.fw_interval);
-                // bool res = extend_left(query_seq[kmer_left_ext - 1], partial_match_interval);
-                if (!res) {
-                    // The current kmer is not present, move to the next partial match by breaking from the inner loop
-                    break;
-                } else {
-                    kmer_left_ext -= 1;
-                    partial_match_interval.match_len += 1;
-                }
-            }
-
-            // There is a possibility to a number of next kmers because of their overlap
-            skip_kmers = (partial_match_interval.match_len < k - 1) ? k - partial_match_interval.match_len - 1 : 0;
-
-            if (partial_match_interval.match_len == k) {
-                // The kmer was found by extending the partial match to left
-                kmers_found += 1;
-                partial_found += 1;
-
-                uint64_t kmers_count = partial_match_interval.fw_interval.count(rlbwt);
-                #pragma omp atomic
-                kmer_stats.total_counts += kmers_count;
-                #pragma omp atomic
-                kmer_stats.positive_skipped += 1; // c += 1;
-
-                if (movi_options->is_debug()) {
-                    DEBUG_MSG("kmer at " + std::to_string(kmer_left_ext + k - 1) + " was found.");
-                    dbg << "1";
-                }
-            } else {
-                skip_kmers = 0;
-                #pragma omp atomic
-                kmer_stats.backward_search_failed += skip_kmers + 1; // d += skip_kmers + 1;
-                if (movi_options->is_debug()) {
-                    dbg << "0";
-                }
-            }
-        }
-
-        // To check the correct count of the total kmers
-        // if (a+b+c+d != 15) std::cerr << a << "\t" << b << "\t" << c << "\t" << d << "\t|" << partial_saved_count << "|\n";
-
-        // At this point all the kmers to the right of kmer_middle are checked using the partial matches
-        pos_on_r = kmer_middle;
-
-    } else {
-        // If we got here, we had to start the first while by breaking because of an unsuccessfull attempt to extend to the right
-        // kmers_found = 0;
-        if (kmer_right != pos_on_r)
-            throw std::runtime_error(ERROR_MSG("[Sequitur - query kmers from bidirectional] This should not happen: "
-                                               + std::to_string(kmer_right) + "\t" + std::to_string(pos_on_r)));
-        // pos_on_r should have already been assigned to be the last kmer_right
-        // So we should never get here to do the assignment in practice
-        pos_on_r = kmer_right;
-
-        if (movi_options->is_debug()) {
-            for (int i = kmer_middle + 1; i <= pos_on_r_saved - 1; i++) {
-                dbg << "0";
-            }
-        }
-
-    }
-    return kmers_found;
-}
 
 uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool single,
                                           MoveInterval* interval_out) {
+    KmerStatistics& ks = thread_kmer_stats();
     size_t ftab_k = movi_options->get_ftab_k();
     size_t k = movi_options->get_k();
     auto& query_seq = mq.query();
@@ -275,8 +29,7 @@ uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool 
     do {
         initial_interval = initialize_backward_search(mq, pos_on_r, match_len);
         if (match_len == 0 and ftab_k > 1) {
-            #pragma omp atomic
-            kmer_stats.initialize_skipped += 1;
+                        ks.initialize_skipped += 1;
             pos_on_r -= 1;
             pos_on_r_saved = pos_on_r;
         }
@@ -288,35 +41,21 @@ uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool 
     if (backward_search_result.is_empty()) {
         // We get here when there is an illegal character at pos_on_r, just skip the current position
         pos_on_r = pos_on_r_saved - 1;
-        #pragma omp atomic
-        kmer_stats.backward_search_empty += 1;
+                ks.backward_search_empty += 1;
         return 0;
     } else {
         if (pos_on_r_saved - pos_on_r >= k - 1) {
             // At leat one kmer was found, update the postion and return the count
             uint64_t kmers_found = pos_on_r_saved - pos_on_r - k + 2;
-            #pragma omp atomic
-            kmer_stats.positive_skipped += kmers_found - 1;
+                        ks.positive_skipped += kmers_found - 1;
 
             if (interval_out) *interval_out = backward_search_result;
-
-            if (movi_options->is_debug()) {
-                int32_t pos_on_r_ = pos_on_r_saved;
-                auto backward_search_result_one_extra_base = backward_search(query_seq, pos_on_r_, initial_interval, k - match_len - 1);
-                dbg << backward_search_result.count(rlbwt) << "----" <<  backward_search_result_one_extra_base.count(rlbwt) << "\n";
-                dbg << backward_search_result << "\n";
-                if (backward_search_result.count(rlbwt) == backward_search_result_one_extra_base.count(rlbwt)) {
-                    // TODO: Use a counter to count the number of such incidents
-                } else {
-                }
-            }
 
             pos_on_r = pos_on_r + k - 2;
 	        return kmers_found;
         } else {
             // No kmer was found, update the postion
-            #pragma omp atomic
-            kmer_stats.backward_search_failed += 1;
+                        ks.backward_search_failed += 1;
             pos_on_r = pos_on_r_saved - 1;
             return 0;
         }
@@ -325,6 +64,7 @@ uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool 
 
 
 void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
+    KmerStatistics& ks = thread_kmer_stats();
     size_t ftab_k = movi_options->get_ftab_k();
     size_t k = movi_options->get_k();
     auto& query_seq = mq.query();
@@ -334,12 +74,10 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
     if (k == 1) {
         uint64_t kmers_found = 0;
         while (pos_on_r >= 0) {
-            #pragma omp atomic
             kmers_found += check_alphabet(query_seq[pos_on_r]) ? 1 : 0;
             pos_on_r -= 1;
         }
-        #pragma omp atomic
-        kmer_stats.positive_kmers += kmers_found;
+                ks.positive_kmers += kmers_found;
         return;
     }
 
@@ -349,30 +87,32 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
 
 
     int32_t step = k/3;
-    // k - step has to be always greater than ftab-k
-    if (k - step < ftab_k) {
-        step = k - ftab_k - 1;
+    // The look-ahead ("fishing") subproblem has length k - step, which must stay >= ftab_k
+    // so the ftab lookup fits inside it; a deep ftab shrinks the step. When ftab_k >= k
+    // there is no room for a look-ahead skip, and step = k - ftab_k - 1 would go negative
+    // (making the look-ahead peek past the read end). Clamp to 0 and skip the look-ahead
+    // in that case -- an ftab_k-mer already resolves the whole k-mer in one lookup.
+    if (k - step < static_cast<int32_t>(ftab_k)) {
+        step = k - static_cast<int32_t>(ftab_k) - 1;
     }
+    if (step < 0) step = 0;
 
     while (pos_on_r >= k - 1) {
-        if (pos_on_r >= k -1 + step and !look_ahead_backward_search(mq, pos_on_r, step)) {
-            #pragma omp atomic
-            kmer_stats.look_ahead_skipped += step + 1;
+        if (step > 0 && pos_on_r >= k -1 + step and !look_ahead_backward_search(mq, pos_on_r, step)) {
+                        ks.look_ahead_skipped += step + 1;
             pos_on_r = pos_on_r - step - 1;
         } else {
             if (kmer_counts and movi_options->is_kmer_bv()) {
                 // Fast count path: presence positive-skip walk + bitvector
                 // predecessor/successor to resolve each present k-mer's count.
                 uint64_t found = query_kmers_count_bv(mq, pos_on_r);
-                #pragma omp atomic
-                kmer_stats.positive_kmers += found;
+                                ks.positive_kmers += found;
             } else if (kmer_counts) {
                 // Count via the single-kmer presence search (same path as --kmer-bv,
                 // minus the MPHF id): the BWT interval size is the k-mer's occurrence
                 // count on the doubled (fwd+rc) text = occ(x)+occ(rc(x)) = KMC's
-                // canonical count.  The old query_kmers_from_bidirectional path assumed
-                // an ftab (it set ftab_right = kmer_left + ftab_k - 1 and asserted the
-                // init advanced to kmer_left) and threw with the default ftab_k = 0.
+                // canonical count.  This path needs no ftab, so it works with the
+                // default ftab_k = 0.
                 MoveInterval interval;
                 uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r, /*single=*/true, &interval);
                 if (found_kmer_count > 0 && !interval.is_empty()) {
@@ -382,24 +122,20 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                 } else {
                     mq.add_kmer(pos_on_r + 2 - k, found_kmer_count);
                 }
-                #pragma omp atomic
-                kmer_stats.positive_kmers += found_kmer_count;
+                                ks.positive_kmers += found_kmer_count;
             } else {
                 if (movi_options->is_kmer_bv()) {
                     // Fast keep-going MPHF-id walk: positive-skip presence + per-k-mer
-                    // canonical id (lazy-rc inside). 2.2x faster than the per-k-mer
-                    // single-search path (1.61 vs 0.73 M/s, ecoli100 k31), with
-                    // byte-identical ids. The count field shows presence (1); use
-                    // --kmer-count --kmer-bv for occurrence counts.
+                    // canonical id (lazy-rc inside). Produces the same ids as the
+                    // per-k-mer single-search path. The count field shows presence (1);
+                    // use --kmer-count --kmer-bv for occurrence counts.
                     uint64_t found = query_kmers_id_bv(mq, pos_on_r);
-                    #pragma omp atomic
-                    kmer_stats.positive_kmers += found;
+                                        ks.positive_kmers += found;
                 } else {
                     uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r);
                     // Outputing the kmer matches only works for the non-count mode (for now)
                     mq.add_kmer(pos_on_r + 2 - k, found_kmer_count);
-                    #pragma omp atomic
-                    kmer_stats.positive_kmers += found_kmer_count;
+                                        ks.positive_kmers += found_kmer_count;
                 }
             }
         }

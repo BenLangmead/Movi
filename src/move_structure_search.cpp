@@ -75,7 +75,8 @@ bool MoveStructure::extend_bidirectional(char c_, MoveInterval& fw_interval, Mov
         // -> count of c_ in fw_before = count of the new fw_interval (bidirectional
         // BWT invariant), used for the rc end walk below in place of a separate
         // fw_interval.count(rlbwt) pass (a 3rd O(#runs) scan; ~6% of MEM query
-        // cycles per PMU profile, 2026-06-19). Mirrors movi_co.cpp's fused scan.
+        // cycles per PMU profile, 2026-06-19). Mirrors the coroutine MEM fused scan
+        // in coroutine_processor.cpp.
         uint64_t skip = 0, fw_count = 0;
         uint64_t current_run = fw_interval_before_extension.run_start;
         uint64_t current_offset = fw_interval_before_extension.offset_start;
@@ -266,7 +267,16 @@ MoveBiInterval MoveStructure::initialize_bidirectional_search(MoveQuery& mq, int
 }
 
 MoveInterval MoveStructure::initialize_backward_search(MoveQuery& mq, int32_t& pos_on_r, uint64_t& match_len, bool rc) {
-    all_initializations += 1;
+    // all_initializations and no_ftab below are diagnostics, reported only under
+    // --debug. They live on the shared MoveStructure, so incrementing them on every
+    // call has all threads writing one cache line. ZML arrives here once per matching
+    // length, which makes that line, rather than any query work, the limit on how the
+    // query scales with threads. Update them only when they will be read, and
+    // atomically so the reported value is correct when they are.
+    if (movi_options->is_debug()) {
+        #pragma omp atomic
+        all_initializations += 1;
+    }
     // Initialize assuming that the character at pos_on_r exists in the alphabet
     size_t ftab_k = movi_options->get_ftab_k();
     if (movi_options->is_multi_ftab()) {
@@ -285,7 +295,8 @@ MoveInterval MoveStructure::initialize_backward_search(MoveQuery& mq, int32_t& p
     if (movi_options->is_multi_ftab() and ftab_k < movi_options->get_ftab_k()) {
         ftab_k += 2;
     }
-    if (pos_on_r >= ftab_k - 1) {
+    if (pos_on_r >= ftab_k - 1 and movi_options->is_debug()) {
+        #pragma omp atomic
         no_ftab += 1;
     }
     auto& query_seq = mq.query();

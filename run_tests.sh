@@ -173,23 +173,65 @@ if ! run_test "Classification Tests" "classification-tests"; then
 fi
 ((TOTAL_TESTS++))
 
-# movi-co coroutine separator regression (differential vs production Movi).
-# Builds a multi-sequence --separators index so separator runs exist, then
-# checks movi-co's PMLs match production exactly. Guards the separator-run
-# (and broader inline-reimplementation) bug class.
-print_status "Running movi-co separator regression..."
+# Coroutine separator regression (differential: movi query --pml --coroutine vs
+# sequential). Builds a multi-sequence --separators index so separator runs exist,
+# then checks coroutine PMLs match the sequential path exactly. Guards the
+# separator-run (and broader inline-reimplementation) bug class.
+print_status "Running coroutine separator regression..."
 echo "----------------------------------------"
-if bash "$PROJECT_ROOT/tests/regression_movi_co_separators.sh" "$(pwd)"; then
+if bash "$PROJECT_ROOT/tests/regression_coroutine_separators.sh" "$(pwd)"; then
     echo "----------------------------------------"
-    print_success "movi-co separator regression passed"
+    print_success "coroutine separator regression passed"
     echo ""
 else
     echo "----------------------------------------"
-    print_error "movi-co separator regression failed"
+    print_error "coroutine separator regression failed"
     echo ""
     ((FAILED_TESTS++))
 fi
 ((TOTAL_TESTS++))
+
+# Coroutine PML across threshold modes (differential: movi query --pml --coroutine vs
+# sequential in regular-, sampled-, and blocked-thresholds). Serializes each mode's
+# index from a checked-in, mode-independent precursor set (no pfp/grlBWT needed), then
+# checks coroutine PMLs match the sequential path exactly. Guards the mode-portability
+# of the coroutine PML body.
+print_status "Running coroutine PML mode-portability regression..."
+echo "----------------------------------------"
+if bash "$PROJECT_ROOT/tests/regression_coroutine_pml_modes.sh" "$(pwd)"; then
+    echo "----------------------------------------"
+    print_success "coroutine PML mode-portability regression passed"
+    echo ""
+else
+    echo "----------------------------------------"
+    print_error "coroutine PML mode-portability regression failed"
+    echo ""
+    ((FAILED_TESTS++))
+fi
+((TOTAL_TESTS++))
+
+# Thread determinism (PML, ZML and count at -t 1 vs several threaded configurations).
+# The other suites all run single-threaded, so this is the only one that can see a
+# race between worker threads. Needs an index to query, so it is skipped unless
+# MOVI_TEST_SEP_INDEX names one.
+if [ -n "${MOVI_TEST_SEP_INDEX:-}" ]; then
+    print_status "Running thread-determinism regression..."
+    echo "----------------------------------------"
+    if bash "$PROJECT_ROOT/tests/regression_thread_determinism.sh" "$(pwd)"; then
+        echo "----------------------------------------"
+        print_success "thread-determinism regression passed"
+        echo ""
+    else
+        echo "----------------------------------------"
+        print_error "thread-determinism regression failed"
+        echo ""
+        ((FAILED_TESTS++))
+    fi
+    ((TOTAL_TESTS++))
+else
+    print_status "Skipping thread-determinism regression (set MOVI_TEST_SEP_INDEX to enable)"
+    echo ""
+fi
 
 # Re-enable exit on error
 set -e

@@ -280,8 +280,6 @@ void MoveStructure::build_tree_doc_sets() {
         }
         assert(lca != -1);
         compress_to[i] = lca;
-        // debug_out used to be a member of MoveStructure class
-        // debug_out << unique_doc_sets[i] << " " << tree_doc_sets[lca] << "\n";
     }
     
     for (size_t i = 0; i < r; i++) {

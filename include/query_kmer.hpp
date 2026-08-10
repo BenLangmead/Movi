@@ -60,6 +60,22 @@ struct KmerStatistics {
     uint64_t backward_search_failed = 0;
     uint64_t backward_search_empty = 0;
     uint64_t right_extension_failed = 0;
+
+    // Add another tally into this one. Every field is a running total, so summing the
+    // per-thread tallies reproduces exactly what a single shared tally would hold.
+    void merge(const KmerStatistics& o) {
+        agg_num_kmers += o.agg_num_kmers;
+        agg_positive += o.agg_positive;
+        agg_invalid += o.agg_invalid;
+        total_counts += o.total_counts;
+        positive_kmers += o.positive_kmers;
+        positive_skipped += o.positive_skipped;
+        look_ahead_skipped += o.look_ahead_skipped;
+        initialize_skipped += o.initialize_skipped;
+        backward_search_failed += o.backward_search_failed;
+        backward_search_empty += o.backward_search_empty;
+        right_extension_failed += o.right_extension_failed;
+    }
 };
 
 #endif
