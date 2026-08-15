@@ -135,9 +135,13 @@ bool BatchLoader::grabNextRead(Read& curr_read) {
     if (batch_buffer.size() <= 2) 
         FATAL_ERROR("header line is missing an id. invalid query cannot be processed.");
 
-    auto id_length = batch_buffer.find_first_of(" \t\r", 1);
-    id_length = (id_length == std::string::npos) ? batch_buffer.size() : id_length;
-    curr_read.id.assign(batch_buffer.substr(1, id_length));
+    // The id is the header up to the first whitespace, without the leading sigil.
+    // id_end is an index, so the count passed to assign is one less than it: taking
+    // id_end characters from position 1 would carry the delimiter into the id, and
+    // the id is written into the query output.
+    size_t id_end = batch_buffer.find_first_of(" \t\r", 1);
+    if (id_end == std::string::npos) id_end = batch_buffer.size();
+    curr_read.id.assign(batch_buffer, 1, id_end - 1);
 
     // grab the sequence
     if (this->input_format == FQ) {
