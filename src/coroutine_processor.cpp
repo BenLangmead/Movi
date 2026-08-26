@@ -941,10 +941,10 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
             if (k - step < static_cast<int32_t>(ftab_k)) step = k - static_cast<int32_t>(ftab_k) - 1;
             if (step < 0) step = 0;   // ftab_k >= k: no look-ahead room (mirrors query_all_kmers)
 
-            while (pos_on_r >= k - 1) {
+            while (pos_on_r >= 0 and static_cast<size_t>(pos_on_r) + 1 >= k) {
                 bool did_search = true;
 
-                if (step > 0 && pos_on_r >= k - 1 + step) {
+                if (step > 0 && static_cast<size_t>(pos_on_r) + 1 >= k + step) {
                     // ---- look_ahead_backward_search(mq, pos_on_r, step) inlined ----
                     uint64_t la_match_len = 0;
                     int32_t la_pos = pos_on_r - step;
@@ -979,7 +979,8 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
                             pos_on_r -= 1;
                             pos_saved = pos_on_r;
                         }
-                    } while (match_len == 0 && pos_on_r >= k - 1 && ftab_k > 1);
+                    } while (match_len == 0 && pos_on_r >= 0
+                             && static_cast<size_t>(pos_on_r) + 1 >= k && ftab_k > 1);
 
                     if (count_mode && movi_options->is_kmer_bv()) {
                         // ---- keep-going count via the bitvector (W1+W2; inlined
