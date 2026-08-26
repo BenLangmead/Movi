@@ -81,10 +81,14 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
         return;
     }
 
-    while (!check_alphabet(query_seq[pos_on_r])) {
+    // Bounded: a read can be entirely illegal characters, and an unbounded scan walks
+    // off the front of the string. Reads consisting only of N occur in real data.
+    while (pos_on_r >= 0 and !check_alphabet(query_seq[pos_on_r])) {
         pos_on_r -= 1; // Find the first position where the character is legal
     }
-
+    if (pos_on_r < 0) {
+        return; // no legal character in this read, so it contains no k-mers
+    }
 
     int32_t step = k/3;
     // The look-ahead ("fishing") subproblem has length k - step, which must stay >= ftab_k
@@ -97,8 +101,9 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
     }
     if (step < 0) step = 0;
 
-    while (pos_on_r >= k - 1) {
-        if (step > 0 && pos_on_r >= k -1 + step and !look_ahead_backward_search(mq, pos_on_r, step)) {
+    while (pos_on_r >= 0 and static_cast<size_t>(pos_on_r) + 1 >= k) {
+        if (step > 0 && static_cast<size_t>(pos_on_r) + 1 >= k + step
+            and !look_ahead_backward_search(mq, pos_on_r, step)) {
                         ks.look_ahead_skipped += step + 1;
             pos_on_r = pos_on_r - step - 1;
         } else {
@@ -140,7 +145,7 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
             }
         }
 
-        while (!check_alphabet(query_seq[pos_on_r])) {
+        while (pos_on_r >= 0 and !check_alphabet(query_seq[pos_on_r])) {
             pos_on_r -= 1; // Find the first position where the character is legal
         }
     }
