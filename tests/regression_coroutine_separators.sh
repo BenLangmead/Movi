@@ -37,13 +37,19 @@ MV="$BIN/movi-regular-thresholds"
 
 READS="${MOVI_TEST_READS:-$DATA/reads.fasta}"
 
+# Locate the 'movi' launcher (drives the threshold build pipeline and the ftab build).
+LAUNCH=""
+for c in "$BUILD/movi" "$BIN/movi"; do [ -x "$c" ] && LAUNCH="$c" && break; done
+
+# Depth of the ftab the MEM sub-test asks for. MEM search requires an ftab and treats a
+# missing one as a hard error rather than falling back, while `movi build` does not make
+# one, so the test has to build it.
+FTAB_K=10
+
 if [ -n "${MOVI_TEST_SEP_INDEX:-}" ]; then
   IDX="$MOVI_TEST_SEP_INDEX"
   echo "[regression] using prebuilt separator index: $IDX"
 else
-  # Locate the 'movi' launcher (drives the threshold build pipeline).
-  LAUNCH=""
-  for c in "$BUILD/movi" "$BIN/movi"; do [ -x "$c" ] && LAUNCH="$c" && break; done
   [ -n "$LAUNCH" ] || { echo "ERROR: 'movi' launcher not found under $BUILD (needed to build the index)"; exit 2; }
   # Build a multi-sequence reference so --separators yields real separator runs.
   python3 - "$DATA/ref.fasta" "$WORK/ref_multi.fasta" <<'PY'
@@ -58,6 +64,13 @@ PY
   echo "[regression] building separator index via launcher..."
   "$LAUNCH" build --type regular-thresholds --index "$IDX" --fasta "$WORK/ref_multi.fasta" --separators --verify >/dev/null 2>&1 \
     || { echo "ERROR: separator index build failed (threshold pipeline available?)"; exit 2; }
+fi
+
+if [ ! -s "$IDX/ftab.$FTAB_K.bin" ]; then
+  [ -n "$LAUNCH" ] || { echo "ERROR: 'movi' launcher not found under $BUILD (needed to build ftab-$FTAB_K)"; exit 2; }
+  echo "[regression] building ftab-$FTAB_K for the MEM sub-test..."
+  "$LAUNCH" ftab --index "$IDX" --ftab-k "$FTAB_K" >/dev/null 2>&1 \
+    || { echo "ERROR: could not build ftab-$FTAB_K under $IDX"; exit 2; }
 fi
 
 # k for the k-mer sub-test; reads must be at least this long. Override via env.
@@ -163,7 +176,7 @@ compare_file_mode () {  # $1=label  $2=output-file suffix  $3...=query flags (no
 
 compare_file_mode kmer      ".kmers.$K" --kmer       -k "$K"
 compare_file_mode kmercount ".kmers.$K" --kmer-count -k "$K"
-compare_file_mode mem       ".mems"     --mem --ftab-k 10 --min-mem-length 25
+compare_file_mode mem       ".mems"     --mem --ftab-k "$FTAB_K" --min-mem-length 25
 
 # Scope note: this test covers the coroutine queries that run on a plain
 # regular-thresholds --separators index (PML, k-mer presence, k-mer count, MEM). The

@@ -73,9 +73,14 @@ class MoveQuery {
         struct mem_t {
             uint32_t start;
             uint32_t end;
-            uint16_t count;
+            // Occurrences of the MEM in the indexed text, as returned by
+            // MoveInterval::count, which is 64-bit. A conserved MEM occurs once per
+            // sequence in the collection, so on a large bacterial collection this
+            // exceeds any 16- or 32-bit bound; the field matches the source type so
+            // the value cannot wrap on the way in.
+            uint64_t count;
         };
-        void add_mem(uint32_t start, uint32_t end, uint16_t count) {
+        void add_mem(uint32_t start, uint32_t end, uint64_t count) {
             mems.push_back(mem_t(start, end, count));
         }
 

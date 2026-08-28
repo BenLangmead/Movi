@@ -722,7 +722,11 @@ MoveStructure::coroutine_task MoveStructure::query_mem_coroutine(
             if (ftab_skip) {
                 // ftab can't seed bidirectional; pure backward search to find pos_on_r.
                 MoveInterval fw_interval = bi_interval.fw_interval;
-                for (size_t j = 0; j <= static_cast<size_t>(init_pos - pos_on_r); ++j) {
+                // Signed counter, as in query_mem_bml: the bound is negative when the
+                // ftab already covers the whole seed (min-mem-length == ftab-k, the
+                // zero-extend case), and a size_t one wraps to SIZE_MAX instead of
+                // skipping the loop.
+                for (int32_t j = 0; j <= init_pos - pos_on_r; ++j) {
                     if (!step_prep(fw_interval, query_seq[init_pos - j])) {
                         pos_on_r = init_pos - j + 1; failed = true; break;
                     }
@@ -735,7 +739,8 @@ MoveStructure::coroutine_task MoveStructure::query_mem_coroutine(
                 // Left extension: extend_bidirectional inlined so co_yield is placed
                 // only at the LF jump on fw_interval. Sequential scan and rc walk
                 // follow step_finish with no yield.
-                for (size_t j = 0; j <= static_cast<size_t>(init_pos - pos_on_r); ++j) {
+                // Signed counter, same reason as the ftab_skip loop above.
+                for (int32_t j = 0; j <= init_pos - pos_on_r; ++j) {
                     char c_ = query_seq[init_pos - j];
                     char c_comp = complement(c_);
 
