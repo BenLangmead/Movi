@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <iomanip>
 #include "utils.hpp"
 #include "move_structure.hpp"
 #include "commons.hpp"
@@ -402,6 +403,76 @@ void output_mems(bool to_stdout, std::ostream& mems_file, MoveQuery& mq) {
 }
 
 
+void output_kmer_views(MoveQuery& mq, MoviOptions& movi_options,
+                       std::vector<std::string>& lines,
+                       std::vector<KmerViewAgg>& aggs) {
+    const std::vector<uint32_t>& ks = movi_options.get_kmer_out_ks();
+    const std::string& seq = mq.query();
+    const size_t read_len = seq.length();
+    std::vector<MoveQuery::mem_t>& mems = mq.get_mems();
+    if (aggs.size() < ks.size()) aggs.resize(ks.size());
+
+    for (size_t ki = 0; ki < ks.size(); ki++) {
+        const size_t k = ks[ki];
+        const size_t total = (read_len >= k) ? (read_len - k + 1) : 0;
+
+        // A MEM [start, end) long enough to hold a k-mer means every k-mer starting in
+        // the closed range [start, end - k] is present. The MEM search walks the read
+        // left to right, so these arrive with non-decreasing start and can be merged in
+        // one pass; ranges that touch belong to the same run of consecutive k-mers.
+        std::vector<std::pair<uint64_t, uint64_t>> runs;
+        for (auto& m : mems) {
+            if (static_cast<uint64_t>(m.end) < static_cast<uint64_t>(m.start) + k) continue;
+            uint64_t lo = m.start;
+            uint64_t hi = static_cast<uint64_t>(m.end) - k;
+            if (!runs.empty() && lo <= runs.back().second + 1) {
+                if (hi > runs.back().second) runs.back().second = hi;
+            } else {
+                runs.push_back(std::make_pair(lo, hi));
+            }
+        }
+
+        uint64_t positive = 0;
+        for (auto& r : runs) positive += r.second - r.first + 1;
+
+        // The k-mer query scans each read from its end, so it reports runs in
+        // descending start order; emit the same order so the file is byte-identical
+        // to the one a separate --kmer run would write.
+        std::string body;
+        for (auto it = runs.rbegin(); it != runs.rend(); ++it) {
+            body += std::to_string(it->first) + ":" +
+                    std::to_string(it->second - it->first + 1) + " ";
+        }
+
+        lines.push_back(mq.get_query_id() + "\t" + std::to_string(positive) + "/" +
+                        std::to_string(total) + "\t" + body + "\n");
+
+        aggs[ki].num += total;
+        aggs[ki].positive += positive;
+        aggs[ki].invalid += count_invalid_kmer_windows(seq, k);
+    }
+}
+
+void write_kmer_view_reports(MoviOptions& movi_options, OutputFiles& output_files,
+                             const std::vector<KmerViewAgg>& aggs) {
+    const std::vector<uint32_t>& ks = movi_options.get_kmer_out_ks();
+    for (size_t ki = 0; ki < ks.size() && ki < output_files.kmer_out_reports.size(); ki++) {
+        std::ofstream& o = output_files.kmer_out_reports[ki];
+        if (!o.is_open() || ki >= aggs.size()) continue;
+        const KmerViewAgg& a = aggs[ki];
+        uint64_t neg = (a.num >= a.positive + a.invalid) ? a.num - a.positive - a.invalid : 0;
+        auto pct = [&](uint64_t v) {
+            return a.num ? (100.0 * static_cast<double>(v) / static_cast<double>(a.num)) : 0.0;
+        };
+        o << std::setprecision(6);
+        o << "==== query report (k = " << ks[ki] << "):\n";
+        o << "num_kmers = " << a.num << "\n";
+        o << "num_positive_kmers = " << a.positive << " (" << pct(a.positive) << "%)\n";
+        o << "num_negative_kmers = " << neg << " (" << pct(neg) << "%)\n";
+        o << "num_invalid_kmers = " << a.invalid << " (" << pct(a.invalid) << "%)\n";
+    }
+}
+
 void open_output_files(MoviOptions& movi_options, OutputFiles& output_files) {
 
     std::string index_type = program();
@@ -413,6 +484,22 @@ void open_output_files(MoviOptions& movi_options, OutputFiles& output_files) {
 
     bool should_open_files = (!movi_options.is_stdout() || movi_options.is_classify()) &&
                              movi_options.write_output_allowed();
+
+    // The --kmer-out membership views always go to files: under --stdout the MEM
+    // stream owns stdout, so these cannot share it. Their names match what a separate
+    // --kmer -k <k> run writes, so the two are directly comparable.
+    if (movi_options.is_kmer_out() && movi_options.write_output_allowed()) {
+        std::string base = movi_options.get_out_file() != "" ? movi_options.get_out_file()
+                                                             : movi_options.get_read_file() + "." + index_type;
+        const std::vector<uint32_t>& ks = movi_options.get_kmer_out_ks();
+        output_files.kmer_out_files.resize(ks.size());
+        output_files.kmer_out_reports.resize(ks.size());
+        for (size_t ki = 0; ki < ks.size(); ki++) {
+            std::string name = base + ".kmers." + std::to_string(ks[ki]);
+            output_files.kmer_out_files[ki] = std::ofstream(name);
+            output_files.kmer_out_reports[ki] = std::ofstream(name + ".report");
+        }
+    }
 
     if (should_open_files) {
 

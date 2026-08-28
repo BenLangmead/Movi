@@ -124,6 +124,10 @@ void handle_kmer(MoveQuery& mq, MoviOptions& movi_options,
 }
 
 // Function to handle mem processing for a single read
+// Accumulated across reads inside the movi_output critical section, then written to
+// the per-k report files once the query is over.
+static std::vector<KmerViewAgg> kmer_view_aggs;
+
 void handle_mem(MoveQuery& mq, MoviOptions& movi_options,
                 MoveStructure& mv_, OutputFiles& output_files) {
     mv_.query_mems(mq);
@@ -131,6 +135,13 @@ void handle_mem(MoveQuery& mq, MoviOptions& movi_options,
         #pragma omp critical(movi_output)
         {
             output_mems(movi_options.write_stdout_enabled(), output_files.mems_file, mq);
+            if (movi_options.is_kmer_out()) {
+                std::vector<std::string> lines;
+                output_kmer_views(mq, movi_options, lines, kmer_view_aggs);
+                for (size_t ki = 0; ki < lines.size() && ki < output_files.kmer_out_files.size(); ki++) {
+                    output_files.kmer_out_files[ki] << lines[ki];
+                }
+            }
         }
     }
 }
@@ -334,10 +345,41 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
     }
 #endif
 
+    if (movi_options.is_kmer_out() && !movi_options.is_mem()) {
+        throw std::runtime_error(ERROR_MSG("--kmer-out derives its membership views from the MEM "
+            "stream, so it requires --mem."));
+    }
+
     if (movi_options.is_mem()) {
         if (!movi_options.no_prefetch()) {
             movi_options.set_prefetch(false);
             WARNING_MSG("MEM finding does not support prefetching. Continuing with prefetching disabled.");
+        }
+        // A membership view at k is only complete when k >= min-mem-length: a shorter k
+        // would need matches the MEM search never reported. Left to itself the threshold
+        // becomes the index's deepest ftab, which is both the most permissive setting and
+        // the zero-extend optimum for the search.
+        if (movi_options.is_kmer_out()) {
+            if (!movi_options.is_min_mem_length_explicit() && movi_options.get_ftab_k() > 0) {
+                movi_options.set_min_mem_length(movi_options.get_ftab_k());
+            }
+            uint32_t min_k = movi_options.get_kmer_out_ks().front();  // parser sorts ascending
+            if (min_k < movi_options.get_min_mem_length()) {
+                throw std::runtime_error(ERROR_MSG("--kmer-out k=" + std::to_string(min_k) +
+                    " is below --min-mem-length (" + std::to_string(movi_options.get_min_mem_length()) +
+                    "), so the MEM stream omits matches shorter than the threshold and the membership "
+                    "view would under-report. Lower --min-mem-length to " + std::to_string(min_k) +
+                    " or below; min-mem-length == ftab-k is the fastest setting."));
+            }
+            if (movi_options.is_kmer_count()) {
+                throw std::runtime_error(ERROR_MSG("--kmer-out reports membership only. A MEM's count is "
+                    "the multiplicity of the whole match, not of each k-mer within it, so per-k-mer "
+                    "counts cannot be derived from the MEM stream."));
+            }
+            if (movi_options.is_output_format_kmc() || movi_options.is_output_format_sshash()) {
+                throw std::runtime_error(ERROR_MSG("--kmer-out writes the default k-mer format only: "
+                    "--output-format kmc needs per-k-mer counts, and sshash suppresses per-read lines."));
+            }
         }
         if (movi_options.get_ftab_k() == 0) {
             throw std::runtime_error(ERROR_MSG("MEM finding requires an ftab, but none was found in the index. Build one with `movi ftab --ftab-k 12` (a deeper ftab means faster MEM search; ftab-12 is recommended). It is then auto-selected, or pass --ftab-k <k> explicitly."));
@@ -401,7 +443,10 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
             run_coroutine_query(mv_, movi_options.get_read_file(),
                                 static_cast<int>(movi_options.get_strands()),
                                 static_cast<int>(movi_options.get_threads()), copts,
-                                movi_options.write_stdout_enabled() ? std::cout : dest);
+                                movi_options.write_stdout_enabled() ? std::cout : dest,
+                                movi_options.is_kmer_out() ? &output_files.kmer_out_files : nullptr,
+                                movi_options.is_kmer_out() ? &kmer_view_aggs : nullptr);
+            write_kmer_view_reports(movi_options, output_files, kmer_view_aggs);
             close_output_files(movi_options, output_files);
             return;
         }
@@ -604,6 +649,7 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
         classifier.close_report_file();
     }
 
+    write_kmer_view_reports(movi_options, output_files, kmer_view_aggs);
     close_output_files(movi_options, output_files);
 }
 
