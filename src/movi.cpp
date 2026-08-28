@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <iostream>
+#include <sstream>
 #include <cstddef>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -134,7 +135,7 @@ void handle_mem(MoveQuery& mq, MoviOptions& movi_options,
     if (movi_options.write_output_allowed()) {
         #pragma omp critical(movi_output)
         {
-            output_mems(movi_options.write_stdout_enabled(), output_files.mems_file, mq);
+            output_mems(movi_options.write_stdout_enabled(), output_files.mems_file, mq, movi_options);
             if (movi_options.is_kmer_out()) {
                 std::vector<std::string> lines;
                 output_kmer_views(mq, movi_options, lines, kmer_view_aggs);
@@ -144,6 +145,125 @@ void handle_mem(MoveQuery& mq, MoviOptions& movi_options,
             }
         }
     }
+}
+
+void setup_input_file(std::ifstream& input_file, const std::string& read_file);
+
+// Rebuild --kmer-style membership views from a MEM stream produced earlier by
+// `movi query --mem`, without opening an index. The reads are required as well as the
+// MEMs: the k-mer format prints found/(len - k + 1), reads whose search found no MEM
+// contribute no lines to the MEM stream at all, and the invalid-window tally needs the
+// bases. Reads and MEMs are both in input order, and a read's MEMs are contiguous with
+// non-decreasing start, so the two streams are walked together rather than indexed by
+// id, which also keeps memory flat on large inputs.
+void kmers_from_mems(MoviOptions& movi_options) {
+    OutputFiles output_files;
+    open_output_files(movi_options, output_files);
+
+    std::ifstream mems_in(movi_options.get_mems_file());
+    if (!mems_in) {
+        throw std::runtime_error(ERROR_MSG("Could not open the MEM stream at " +
+                                           movi_options.get_mems_file()));
+    }
+
+    // The reads are optional. Each line carries its read's length, which is all the
+    // membership views need; the bases are needed only to tell an invalid window (one
+    // holding a non-ACGT base) from a negative one in the aggregate report.
+    const bool have_reads = !movi_options.get_read_file().empty();
+    std::ifstream reads_in;
+    BatchLoader reader;
+    Read curr_read;
+    bool batch_loaded = false;
+    if (have_reads) setup_input_file(reads_in, movi_options.get_read_file());
+    // A batch has to be loaded before grabNextRead may be called, so load first and
+    // only then drain, refilling whenever the current batch runs out.
+    auto next_read = [&]() -> bool {
+        if (!have_reads) return false;
+        while (true) {
+            if (batch_loaded && reader.grabNextRead(curr_read)) return true;
+            batch_loaded = reader.loadBatch(reads_in, 10000000, 1);
+            if (!batch_loaded) return false;
+        }
+    };
+
+    std::vector<KmerViewAgg> aggs;
+    std::string line;
+    uint64_t records = 0, mems_used = 0, mismatches = 0;
+
+    while (std::getline(mems_in, line)) {
+        if (line.empty()) continue;
+        size_t t1 = line.find('\t');
+        size_t t2 = (t1 == std::string::npos) ? std::string::npos : line.find('\t', t1 + 1);
+        if (t1 == std::string::npos || t2 == std::string::npos) {
+            throw std::runtime_error(ERROR_MSG("Malformed MEM line: " + line.substr(0, 80)));
+        }
+        // The legacy format is id, start, end, count: four fields, so a third tab.
+        if (line.find('\t', t2 + 1) != std::string::npos) {
+            throw std::runtime_error(ERROR_MSG("This looks like the Movi 2.0.0 MEM format "
+                "(one line per MEM, no read length). It cannot represent a read with no MEMs, "
+                "so it is not accepted here; regenerate the stream without --legacy-mems."));
+        }
+
+        std::string id = line.substr(0, t1);
+        // Field two is covered/read_len; only the denominator is needed here.
+        std::string summary = line.substr(t1 + 1, t2 - t1 - 1);
+        size_t slash = summary.find('/');
+        if (slash == std::string::npos) {
+            throw std::runtime_error(ERROR_MSG("Expected a covered/read_len field but found: " +
+                                               summary + " on line: " + line.substr(0, 80)));
+        }
+        size_t read_len = std::stoull(summary.substr(slash + 1));
+
+        std::string seq;
+        bool bases_known = false;
+        if (next_read()) {
+            seq = curr_read.seq;
+            bases_known = true;
+            if (curr_read.id != id || seq.length() != read_len) mismatches++;
+        }
+        if (!bases_known) {
+            // Only the length matters for the views; a placeholder of valid bases keeps
+            // the invalid tally at zero, and invalid_known below marks it unavailable.
+            seq.assign(read_len, 'A');
+        }
+
+        MoveQuery mq(seq);
+        mq.set_query_id(id);
+        std::istringstream ts(line.substr(t2 + 1));
+        std::string tok;
+        while (ts >> tok) {
+            size_t c1 = tok.find(':');
+            size_t c2 = (c1 == std::string::npos) ? std::string::npos : tok.find(':', c1 + 1);
+            if (c1 == std::string::npos || c2 == std::string::npos) continue;
+            mq.add_mem(static_cast<uint32_t>(std::stoul(tok.substr(0, c1))),
+                       static_cast<uint32_t>(std::stoul(tok.substr(c1 + 1, c2 - c1 - 1))),
+                       std::stoull(tok.substr(c2 + 1)));
+            mems_used++;
+        }
+
+        std::vector<std::string> lines;
+        output_kmer_views(mq, movi_options, lines, aggs);
+        if (!bases_known) {
+            for (auto& a : aggs) a.invalid_known = false;
+        }
+        for (size_t ki = 0; ki < lines.size() && ki < output_files.kmer_out_files.size(); ki++) {
+            output_files.kmer_out_files[ki] << lines[ki];
+        }
+        records++;
+    }
+
+    if (mismatches > 0) {
+        WARNING_MSG(std::to_string(mismatches) + " line(s) did not match the read at the same "
+            "position by id or length; the reads may be a different set or in a different order. "
+            "The membership views use each line's own length, so they are unaffected, but the "
+            "invalid-window tally in the reports may be wrong.");
+    }
+    write_kmer_view_reports(movi_options, output_files, aggs);
+    close_output_files(movi_options, output_files);
+    INFO_MSG("kmers-from-mems: " + std::to_string(records) + " reads, " +
+             std::to_string(mems_used) + " MEMs, " +
+             std::to_string(movi_options.get_kmer_out_ks().size()) + " membership views written" +
+             (have_reads ? "." : " (no reads given; invalid-window tallies reported as NA)."));
 }
 
 // Helper function to setup input file stream
@@ -1002,6 +1122,8 @@ int main(int argc, char** argv) {
             auto end = std::chrono::system_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
             TIMING_MSG(elapsed, "LF-mapping for all the BWT characters in the" + movi_options.get_LF_type() + " order");
+        } else if (command == "kmers-from-mems") {
+            kmers_from_mems(movi_options);
         } else if (command == "inspect") {
             MoveStructure mv_(&movi_options);
             mv_.deserialize();

@@ -881,7 +881,7 @@ MoveStructure::coroutine_task MoveStructure::query_mem_coroutine(
         // identical to the sequential/strand path by construction; the reorder
         // buffer still emits in input order.
         std::ostringstream oss;
-        output_mems(false, oss, mq);
+        output_mems(false, oss, mq, *movi_options);
         if (movi_options->is_kmer_out()) {
             // parts[0] is the MEM record; output_kmer_views appends one membership
             // line per k, in the same order as the streams the emitter holds.

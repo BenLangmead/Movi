@@ -200,7 +200,8 @@ void output_logs(std::ofstream& costs_file, std::ofstream& scans_file, std::ofst
 
 void output_read(MoveQuery& mq);
 
-void output_mems(bool to_stdout, std::ostream& mems_file, MoveQuery& mq);
+void output_mems(bool to_stdout, std::ostream& mems_file, MoveQuery& mq,
+                 MoviOptions& movi_options);
 
 // Per-k tallies behind the --kmer-out aggregate reports: every length-k window of
 // every read is exactly one of positive, negative, or invalid (contains a non-ACGT
@@ -209,6 +210,9 @@ struct KmerViewAgg {
     uint64_t num = 0;
     uint64_t positive = 0;
     uint64_t invalid = 0;
+    // False when the bases were not available, so invalid windows could not be told
+    // apart from negatives (kmers-from-mems run without the reads).
+    bool invalid_known = true;
 };
 
 // Render one read's MEMs as a --kmer-style membership line for each k in

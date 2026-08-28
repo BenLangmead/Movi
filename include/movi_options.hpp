@@ -85,6 +85,8 @@ class MoviOptions {
         // Empty unless --kmer-out was given.
         const std::vector<uint32_t>& get_kmer_out_ks() const { return kmer_out_ks; }
         bool is_kmer_out() const { return !kmer_out_ks.empty(); }
+        const std::string& get_mems_file() const { return mems_file; }
+        bool is_legacy_mems() const { return legacy_mems; }
         uint32_t get_ftab_k () { return ftab_k; }
         uint32_t get_tally_checkpoints () { return tally_checkpoints; }
         uint64_t get_SA_sample_rate() { return SA_sample_rate; }
@@ -152,6 +154,8 @@ class MoviOptions {
         void set_k(uint32_t k_) { k = k_; }
         void set_min_mem_length(uint32_t min_mem_length_) { min_mem_length = min_mem_length_; }
         void set_kmer_out_ks(const std::vector<uint32_t>& ks) { kmer_out_ks = ks; }
+        void set_mems_file(const std::string& f) { mems_file = f; }
+        void set_legacy_mems(bool v) { legacy_mems = v; }
         void set_min_mem_length_explicit(bool v) { min_mem_length_explicit = v; }
         bool is_min_mem_length_explicit() const { return min_mem_length_explicit; }
         void set_ftab_k(uint32_t ftab_k_) { ftab_k = ftab_k_; }
@@ -307,6 +311,12 @@ class MoviOptions {
         // explicit choice from the default and pick the zero-extend optimum instead.
         bool min_mem_length_explicit = false;
         std::vector<uint32_t> kmer_out_ks;
+        // Emit the Movi 2.0.0 MEM format instead of the current one, for consumers
+        // written against it. That format cannot represent a read with no MEMs, so it
+        // is write-only: kmers-from-mems does not accept it.
+        bool legacy_mems = false;
+        // Input for the kmers-from-mems command: a MEM stream written earlier by --mem.
+        std::string mems_file;
         uint32_t ftab_k = 0;
         uint32_t tally_checkpoints = 20;
         uint64_t SA_sample_rate = 100;

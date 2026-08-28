@@ -390,16 +390,44 @@ void print_query_stats(MoviOptions& movi_options, uint64_t total_ff_count, MoveS
     }
 }
 
-void output_mems(bool to_stdout, std::ostream& mems_file, MoveQuery& mq) {
-    if (to_stdout) {
+// One line per read: the read id, the read length, then a space-separated token per
+// MEM as start:end:count, where end is exclusive and count is the number of places the
+// MEM occurs in the collection on either strand. A read whose search found no MEM still
+// gets its line, with an empty token field, so a consumer sees every read it submitted.
+// This mirrors the shape of the k-mer output ("id  found/total  start:count ..."), which
+// is the same per-read, colon-within-token, space-between-tokens layout.
+//
+// --legacy-mems restores the Movi 2.0.0 emission: one line per MEM, id repeated, no read
+// length, and nothing at all for a read without a MEM.
+void output_mems(bool to_stdout, std::ostream& mems_file, MoveQuery& mq,
+                 MoviOptions& movi_options) {
+    std::ostream& out = to_stdout ? static_cast<std::ostream&>(std::cout)
+                                  : static_cast<std::ostream&>(mems_file);
+    if (movi_options.is_legacy_mems()) {
         for (auto& mem : mq.get_mems()) {
-            std::cout << mq.get_query_id() << "\t" << mem.start << "\t" << mem.end << "\t" << mem.count << "\n";
+            out << mq.get_query_id() << "\t" << mem.start << "\t" << mem.end << "\t"
+                << mem.count << "\n";
         }
-    } else {
-        for (auto& mem : mq.get_mems()) {
-            mems_file << mq.get_query_id() << "\t" << mem.start << "\t" << mem.end << "\t" << mem.count << "\n";
-        }
+        return;
     }
+    // Bases of the read covered by at least one MEM, over the read length. This is the
+    // counterpart of the k-mer output's found/total: how much of this read matched, out
+    // of how much there was. MEMs arrive with increasing start and may overlap, so the
+    // covered span is accumulated by merging as we go.
+    uint64_t covered = 0, run_start = 0, run_end = 0;
+    bool in_run = false;
+    for (auto& mem : mq.get_mems()) {
+        if (!in_run) { run_start = mem.start; run_end = mem.end; in_run = true; }
+        else if (mem.start <= run_end) { if (mem.end > run_end) run_end = mem.end; }
+        else { covered += run_end - run_start; run_start = mem.start; run_end = mem.end; }
+    }
+    if (in_run) covered += run_end - run_start;
+
+    out << mq.get_query_id() << "\t" << covered << "/" << mq.query().length() << "\t";
+    for (auto& mem : mq.get_mems()) {
+        out << mem.start << ":" << mem.end << ":" << mem.count << " ";
+    }
+    out << "\n";
 }
 
 
@@ -469,7 +497,13 @@ void write_kmer_view_reports(MoviOptions& movi_options, OutputFiles& output_file
         o << "num_kmers = " << a.num << "\n";
         o << "num_positive_kmers = " << a.positive << " (" << pct(a.positive) << "%)\n";
         o << "num_negative_kmers = " << neg << " (" << pct(neg) << "%)\n";
-        o << "num_invalid_kmers = " << a.invalid << " (" << pct(a.invalid) << "%)\n";
+        if (a.invalid_known) {
+            o << "num_invalid_kmers = " << a.invalid << " (" << pct(a.invalid) << "%)\n";
+        } else {
+            // Which windows hold a non-ACGT base depends on the bases, so without the
+            // reads this cannot be told apart from a negative.
+            o << "num_invalid_kmers = NA (reads not supplied; invalid windows counted as negative)\n";
+        }
     }
 }
 
