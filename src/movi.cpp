@@ -496,9 +496,10 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                     "the multiplicity of the whole match, not of each k-mer within it, so per-k-mer "
                     "counts cannot be derived from the MEM stream."));
             }
-            if (movi_options.is_output_format_kmc() || movi_options.is_output_format_sshash()) {
+            if (!movi_options.is_output_format_movi()) {
                 throw std::runtime_error(ERROR_MSG("--kmer-out writes the default k-mer format only: "
-                    "--output-format kmc needs per-k-mer counts, and sshash suppresses per-read lines."));
+                    "--output-format kmc needs per-k-mer counts, sshash suppresses per-read lines, and "
+                    "perfect-id needs the per-k-mer bitvector ids."));
             }
         }
         if (movi_options.get_ftab_k() == 0) {

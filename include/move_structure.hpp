@@ -79,6 +79,70 @@ class MoveStructure {
         uint64_t fast_forward(uint64_t& offset, uint64_t index, uint64_t x);
 
         char illegal_char_substitute();
+        // Applies the --ignore-illegal-chars substitution across the whole read, once.
+        void substitute_illegal_chars(MoveQuery& mq);
+        // Walks rc(read) once, leaving for every present k-mer a row inside its reverse
+        // complement's BWT interval.
+        void prepare_rc_kmer_rows(MoveQuery& mq);
+        uint64_t rc_kmer_rows_walk(MoveQuery& mq, int32_t& pos_on_r, size_t read_len);
+        // Run-local representation of B_k for the id query. An id is rank_{B_k}(lb), a
+        // global prefix count, so unlike the count structure's predecessor and successor
+        // a purely local record does not suffice: the decomposition carries a prefix term
+        // as well as a within-run term,
+        //   id = (marks in runs < run) + (marks in run `run` at offset <= off) - 1.
+        // A mark on a run head is a bit in kmerbv_idhd; a mark at a positive offset is an
+        // entry in kmerbv_idgioff, delimited per run by kmerbv_idsep. Every access is
+        // keyed by `run`, which the search has just touched, so no absolute BWT row and
+        // no per-run position table enter the id path.
+        bool kmerbv_use_runlocal = false;
+        sdsl::bit_vector kmerbv_idhd;   // idhd[run] = 1 iff the run head carries a B_k mark
+        sdsl::rank_support_v<> kmerbv_idhd_rank;
+        // Run separators over the off-head marks: run i contributes a 1 followed by one 0
+        // per off-head mark it holds. select_1(i + 1) lands at i plus the marks in earlier
+        // runs, giving that prefix by subtraction, and the zeros following it give this
+        // run's own count. Keeping the prefix here leaves the head rank and this select
+        // independent, so the two issue in parallel.
+        sdsl::bit_vector kmerbv_idsep;
+        sdsl::select_support_mcl<1> kmerbv_idsep_sel;
+        // Off-head offsets, delta-coded within each run and packed in a dac_vector, which
+        // reads any entry in O(1). A run's slice is short, so it is decoded by a scan.
+        sdsl::dac_vector<2> kmerbv_idgioff;
+
+        // Number of 0s immediately following position p in kmerbv_idsep, which is the
+        // number of off-head marks held by the run whose separator sits at p.
+        inline uint64_t kmerbv_idsep_zeros_after(uint64_t p) const {
+            uint64_t rest = kmerbv_idsep.size() - (p + 1);
+            if (rest == 0) return 0;
+            uint8_t w = (rest >= 64) ? 64 : static_cast<uint8_t>(rest);
+            uint64_t word = kmerbv_idsep.get_int(p + 1, w);
+            if (word != 0) return sdsl::bits::lo(word);
+            if (rest < 64) return rest;
+            uint64_t z = 64, q = p + 65;
+            while (q < kmerbv_idsep.size() and kmerbv_idsep[q] == 0) { ++z; ++q; }
+            return z;
+        }
+
+        // Number of B_k marks at rows up to and including (run, offset), which is
+        // rank_{B_k}(lb + 1) for lb = all_p[run] + offset.
+        inline uint64_t kmerbv_rank_runlocal(uint64_t run, uint64_t offset) {
+            uint64_t p = kmerbv_idsep_sel(run + 1);
+            uint64_t a = p - run;   // off-head marks lying in runs before `run`
+            // A head mark sits at offset 0, so it always counts when the run matches.
+            uint64_t cnt = kmerbv_idhd_rank(run) + a + (kmerbv_idhd[run] ? 1 : 0);
+            uint64_t c = kmerbv_idsep_zeros_after(p);
+            if (c > 0) {
+                uint64_t cur = kmerbv_idgioff[a];
+                if (cur <= offset) {
+                    cnt += 1;
+                    for (uint64_t i = 1; i < c; ++i) {
+                        cur += kmerbv_idgioff[a + i];
+                        if (cur > offset) break;
+                        cnt += 1;
+                    }
+                }
+            }
+            return cnt;
+        }
         bool check_alphabet(char& c);
         uint32_t compute_index(char row_char, char lookup_char);
 
@@ -505,8 +569,10 @@ class MoveStructure {
         }
         // MPHF id of the k-mer whose interval starts at (run, offset): id =
         // rank(lb+1)-1 with lb = all_p[run]+offset. Holds for an exact OR a subset
-        // interval (the k-mer's mark is the only 1 in its group).
+        // interval (the k-mer's mark is the only 1 in its group). The run-local
+        // representation answers the same rank without forming lb at all.
         inline uint64_t kmerbv_id(uint64_t run, uint64_t offset) {
+            if (kmerbv_use_runlocal) return kmerbv_rank_runlocal(run, offset) - 1;
             uint64_t lb = reconstruct_allp(run) + offset;
             return kmerbv_use_sd ? (kmerbv_sd_rank(lb + 1) - 1)
                                  : (kmerbv_rank(lb + 1) - 1);

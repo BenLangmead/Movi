@@ -13,6 +13,16 @@ class MoveQuery {
         std::string& query() { return query_string; }
         uint64_t length() { return query_string.length(); }
 
+        // One record per present query k-mer, in the order the search found them.
+        // The search walks a read right to left, so positions arrive descending; a
+        // consumer that needs input order scatters the records by pos.
+        struct kmer_hit_t {
+            int32_t pos;     // start position of the k-mer in the read
+            uint64_t count;  // the value shown in the count field
+            uint64_t id;     // MPHF id, or absent_id when no bitvector id was resolved
+        };
+        static constexpr uint64_t absent_id = std::numeric_limits<uint64_t>::max();
+
         // kmer_count drives the read-level presence tally (found_kmer_count =
         // number of present k-mers).  display_count, when provided, is what is
         // printed in the per-k-mer count field instead of kmer_count — used by
@@ -31,9 +41,9 @@ class MoveQuery {
                 found_kmer_count += kmer_count;
                 uint64_t shown = (display_count != std::numeric_limits<uint64_t>::max())
                                  ? display_count : kmer_count;
-                // Structured record for non-native output formats (e.g. KMC dump):
-                // each present k-mer's start position in the read and its shown count.
-                kmer_pos_count.emplace_back(pos_on_r, shown);
+                // Structured record for the non-native output formats: the k-mer's
+                // start position, its shown count, and its id where one was resolved.
+                kmer_hits.push_back(kmer_hit_t{pos_on_r, shown, kmer_id});
                 if (kmer_id != std::numeric_limits<uint64_t>::max()) {
                     matching_lengths_string += std::to_string(pos_on_r) + ":" +
                                                std::to_string(shown) + ":" +
@@ -91,7 +101,7 @@ class MoveQuery {
         std::vector<uint64_t>& get_matching_colors() { return matching_colors; }
         std::vector<uint64_t>& get_sa_entries() { return sa_entries; }
         std::string& get_matching_lengths_string() { return matching_lengths_string; }
-        std::vector<std::pair<int32_t, uint64_t>>& get_kmer_pos_count() { return kmer_pos_count; }
+        std::vector<kmer_hit_t>& get_kmer_hits() { return kmer_hits; }
         std::vector<mem_t>& get_mems() { return mems; }
         std::vector<uint16_t>& get_scans() { return scans; }
         std::vector<uint16_t>& get_fastforwards() { return fastforwards; }
@@ -113,7 +123,7 @@ class MoveQuery {
         std::string query_id = "";
         std::string query_string = "";
         std::string matching_lengths_string = "";
-        std::vector<std::pair<int32_t, uint64_t>> kmer_pos_count;  // (pos, count) per present k-mer
+        std::vector<kmer_hit_t> kmer_hits;  // one entry per present k-mer
         std::vector<uint64_t> sa_entries;
         std::vector<uint16_t> matching_lens;
         std::vector<uint64_t> matching_colors;

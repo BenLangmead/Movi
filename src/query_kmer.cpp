@@ -63,7 +63,19 @@ uint64_t MoveStructure::query_kmers_from(MoveQuery& mq, int32_t& pos_on_r, bool 
 }
 
 
+// Applies the --ignore-illegal-chars substitution to the whole read in one pass.
+// check_alphabet rewrites in place and mode 2 draws at random, so each illegal position
+// must be substituted once only for the read to be one fixed string for the query.
+void MoveStructure::substitute_illegal_chars(MoveQuery& mq) {
+    if (movi_options->ignore_illegal_chars_status() == 0) return;
+    auto& query_seq = mq.query();
+    for (size_t i = 0; i < query_seq.length(); ++i) {
+        check_alphabet(query_seq[i]);
+    }
+}
+
 void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
+    substitute_illegal_chars(mq);
     KmerStatistics& ks = thread_kmer_stats();
     size_t ftab_k = movi_options->get_ftab_k();
     size_t k = movi_options->get_k();
@@ -88,6 +100,11 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
     }
     if (pos_on_r < 0) {
         return; // no legal character in this read, so it contains no k-mers
+    }
+
+    // The canonical id walk joins against a reverse complement pass, so that runs first.
+    if (!kmer_counts and movi_options->is_kmer_bv()) {
+        prepare_rc_kmer_rows(mq);
     }
 
     int32_t step = k/3;
