@@ -1,5 +1,6 @@
 #include "move_structure.hpp"
 
+#include <array>
 #include <stack>
 #include <unordered_map>
 #include <fstream>
@@ -419,16 +420,42 @@ uint64_t MoveStructure::query_kmers_count_bv(MoveQuery& mq, int32_t& pos_on_r) {
     return kmers_found;
 }
 
-// MPHF id via the fast presence positive-skip walk (same keep-going structure as
-// query_kmers_count_bv), emitting each present k-mer's canonical id. Needs only
-// B_k + all_p -- NO count structure: for a present k-mer the walk's (subset)
-// interval [lb_row..] sits inside the k-mer's group, and the k-mer's own B_k mark
-// is the only 1 in that group, so id = rank(lb_row + 1) - 1 regardless of how much
-// the match overshot k. Canonical mode: a canonical k-mer uses lb_row directly; a
-// non-canonical k-mer's id comes from an ftab-assisted rc search (lazy-rc). This
-// keeps the positive-skip heuristic that makes presence fast, unlike the per-k-mer
-// single search the default --kmer-bv path uses.
-uint64_t MoveStructure::query_kmers_id_bv(MoveQuery& mq, int32_t& pos_on_r) {
+// Two-bit code in the A<C<G<T order the alphabet uses, so a packed k-mer compares like
+// the string it encodes and a complement is 3 - code. Non-ACGT maps to 0, which the
+// k-mers reaching here never hold, having been matched against the index.
+static inline unsigned base_code(char c) {
+    static constexpr std::array<unsigned char, 256> table = [] {
+        std::array<unsigned char, 256> t{};
+        for (int i = 0; i < 256; ++i) t[i] = 0;
+        t[static_cast<unsigned char>('C')] = 1;
+        t[static_cast<unsigned char>('G')] = 2;
+        t[static_cast<unsigned char>('T')] = 3;
+        return t;
+    }();
+    return table[static_cast<unsigned char>(c)];
+}
+
+// Join table between the two walks, indexed by the k-mer's start position in the
+// forward read: the first row of the reverse complement pass's interval. Per thread.
+namespace {
+struct RcKmerRows {
+    std::vector<uint64_t> run;
+    std::vector<uint64_t> offset;
+    std::vector<uint8_t> filled;
+    void reset(size_t n) {
+        run.resize(n);
+        offset.resize(n);
+        filled.assign(n, 0);
+    }
+};
+thread_local RcKmerRows rc_kmer_rows;
+}  // namespace
+
+// One keep-going run of the presence walk over rc(read), recording the first row of the
+// interval reached for each present k-mer. The leftmost k-mer is a prefix of the current
+// match, so its interval contains the match's, and with R' = rc(read) the k-mer at pos is
+// rc(x) for the forward k-mer x at read_len - pos - k. Statistics are the forward pass's.
+uint64_t MoveStructure::rc_kmer_rows_walk(MoveQuery& mq, int32_t& pos_on_r, size_t read_len) {
     size_t ftab_k = movi_options->get_ftab_k();
     int32_t k = static_cast<int32_t>(movi_options->get_k());
     auto& query_seq = mq.query();
@@ -453,27 +480,150 @@ uint64_t MoveStructure::query_kmers_id_bv(MoveQuery& mq, int32_t& pos_on_r) {
     uint64_t kmers_found = 0;
     while (true) {
         if (anchor - pos_on_r + 1 >= k) {
+            int32_t fw_pos = static_cast<int32_t>(read_len) - pos_on_r - k;
+            if (fw_pos >= 0 and static_cast<size_t>(fw_pos) < rc_kmer_rows.filled.size()) {
+                rc_kmer_rows.run[fw_pos] = interval.run_start;
+                rc_kmer_rows.offset[fw_pos] = interval.offset_start;
+                rc_kmer_rows.filled[fw_pos] = 1;
+            }
+            kmers_found += 1;
+        }
+        if (pos_on_r <= 0) break;
+        MoveInterval prev = interval;
+        if (!backward_search_step(query_seq[pos_on_r - 1], interval)) {
+            interval = prev;
+            break;
+        }
+        pos_on_r -= 1;
+    }
+
+    if (kmers_found > 0) {
+        pos_on_r = pos_on_r + k - 2;
+    } else {
+        pos_on_r = pos_on_r_saved - 1;
+    }
+    return kmers_found;
+}
+
+// Builds rc(read) once and walks it, so every present k-mer has a row inside its reverse
+// complement's interval before the forward pass runs. Costs about one LF step per k-mer
+// where searching rc(x) per non-canonical k-mer costs k - ftab_k. Both walks see the same
+// k-mers, since x and rc(x) occur equally often in the doubled text.
+void MoveStructure::prepare_rc_kmer_rows(MoveQuery& mq) {
+    rc_kmer_rows.reset(0);
+    if (!kmerbv_is_canonical) return;
+
+    const int32_t k = static_cast<int32_t>(movi_options->get_k());
+    const size_t read_len = mq.length();
+    if (k < 2 or read_len < static_cast<size_t>(k)) return;
+    rc_kmer_rows.reset(read_len - k + 1);
+
+    // The reverse complement lives in a MoveQuery, which is what the walk reads through.
+    thread_local MoveQuery rc_mq;
+    auto& fw_seq = mq.query();
+    auto& rc_seq = rc_mq.query();
+    rc_seq.resize(read_len);
+    for (size_t i = 0; i < read_len; ++i) rc_seq[i] = complement(fw_seq[read_len - 1 - i]);
+
+    const size_t ftab_k = movi_options->get_ftab_k();
+    int32_t pos_on_r = static_cast<int32_t>(read_len) - 1;
+    while (pos_on_r >= 0 and !check_alphabet(rc_seq[pos_on_r])) pos_on_r -= 1;
+    if (pos_on_r < 0) return;
+
+    // Same look-ahead ("fishing") skip the forward driver in query_all_kmers uses.
+    int32_t step = k / 3;
+    if (k - step < static_cast<int32_t>(ftab_k)) step = k - static_cast<int32_t>(ftab_k) - 1;
+    if (step < 0) step = 0;
+
+    while (pos_on_r >= 0 and pos_on_r + 1 >= k) {
+        if (step > 0 and pos_on_r + 1 >= k + step
+            and !look_ahead_backward_search(rc_mq, pos_on_r, step)) {
+            pos_on_r = pos_on_r - step - 1;
+        } else {
+            rc_kmer_rows_walk(rc_mq, pos_on_r, read_len);
+        }
+        while (pos_on_r >= 0 and !check_alphabet(rc_seq[pos_on_r])) pos_on_r -= 1;
+    }
+}
+
+// MPHF id via the fast presence positive-skip walk (same keep-going structure as
+// query_kmers_count_bv), emitting each present k-mer's canonical id. Needs only
+// B_k + all_p -- NO count structure: for a present k-mer the walk's (subset)
+// interval [lb_row..] sits inside the k-mer's group, and the k-mer's own B_k mark
+// is the only 1 in that group, so id = rank(lb_row + 1) - 1 regardless of how much
+// the match overshot k. Canonical mode: a canonical k-mer uses lb_row directly; a
+// non-canonical k-mer's id comes from the row the reverse complement pass
+// (prepare_rc_kmer_rows) left for that position. This keeps the positive-skip
+// heuristic that makes presence fast, unlike the per-k-mer single search the
+// default --kmer-bv path uses.
+uint64_t MoveStructure::query_kmers_id_bv(MoveQuery& mq, int32_t& pos_on_r) {
+    size_t ftab_k = movi_options->get_ftab_k();
+    int32_t k = static_cast<int32_t>(movi_options->get_k());
+    auto& query_seq = mq.query();
+    int32_t pos_on_r_saved = pos_on_r;
+
+    uint64_t match_len = 0;
+    MoveInterval interval;
+    do {
+        interval = initialize_backward_search(mq, pos_on_r, match_len);
+        if (match_len == 0 and ftab_k > 1) {
+            pos_on_r -= 1;
+            pos_on_r_saved = pos_on_r;
+        }
+    } while (match_len == 0 and pos_on_r >= k - 1 and ftab_k > 1);
+
+    if (interval.is_empty()) {
+        pos_on_r = pos_on_r_saved - 1;
+        return 0;
+    }
+
+    const int32_t anchor = pos_on_r_saved;
+    uint64_t kmers_found = 0;
+
+    // Canonicalisation runs off two packed words, x and rc(x), rather than substrings:
+    // consecutive emissions are one base apart, so moving x left is a shift plus one new
+    // base, and x <= rc(x) as integers is the same test as on the strings they encode.
+    unsigned __int128 packed = 0, packed_rc = 0;
+    bool packed_ready = false;
+    // rc(x) loses its leftmost base as x gains one, so mask its top group before shifting.
+    const unsigned __int128 rc_keep = (((unsigned __int128)1) << (2 * (k - 1))) - 1;
+
+    while (true) {
+        if (anchor - pos_on_r + 1 >= k) {
             // id from (run, offset): the walk's subset interval sits in the k-mer's
             // group, so kmerbv_id() = rank(addr+1)-1 yields the k-mer's id.
             uint64_t id_run = interval.run_start, id_off = interval.offset_start;
             int orientation = -1;
             if (kmerbv_is_canonical) {
-                std::string xstr = query_seq.substr(pos_on_r, k);
-                std::string rcstr = reverse_complement(xstr);
-                if (xstr <= rcstr) {
+                if (!packed_ready) {
+                    packed = 0; packed_rc = 0;
+                    for (int32_t i = 0; i < k; ++i) {
+                        unsigned code = base_code(query_seq[pos_on_r + i]);
+                        packed = (packed << 2) | code;
+                        packed_rc |= ((unsigned __int128)(3u - code)) << (2 * i);
+                    }
+                    packed_ready = true;
+                } else {
+                    unsigned code = base_code(query_seq[pos_on_r]);
+                    packed = (((unsigned __int128)code) << (2 * (k - 1))) | (packed >> 2);
+                    packed_rc = ((packed_rc & rc_keep) << 2) | (unsigned __int128)(3u - code);
+                }
+                // On the doubled text rc(x) occurs whenever x does, so the reverse
+                // complement pass must have seen this position; without its row any id
+                // read out here would belong to a different k-mer.
+                if (static_cast<size_t>(pos_on_r) >= rc_kmer_rows.filled.size()
+                    or !rc_kmer_rows.filled[pos_on_r]) {
+                    throw std::runtime_error(ERROR_MSG(
+                        "[query kmers id bv] The reverse complement pass found no k-mer at read "
+                        "position " + std::to_string(pos_on_r) +
+                        "; the index must be built on a doubled text."));
+                }
+                if (packed <= packed_rc) {
                     orientation = 0;  // canonical: use the forward (subset) interval
                 } else {
-                    MoveQuery rcq(rcstr);
-                    int32_t rp = k - 1; uint64_t rml = 0;
-                    MoveInterval rc_iv = initialize_backward_search(rcq, rp, rml);
-                    rc_iv = backward_search(rcq.query(), rp, rc_iv,
-                                            std::numeric_limits<int32_t>::max());
-                    if (!rc_iv.is_empty()) {
-                        id_run = rc_iv.run_start; id_off = rc_iv.offset_start;
-                        orientation = 1;
-                    } else {
-                        orientation = 0;
-                    }
+                    id_run = rc_kmer_rows.run[pos_on_r];
+                    id_off = rc_kmer_rows.offset[pos_on_r];
+                    orientation = 1;
                 }
             }
             uint64_t kmer_id = kmerbv_id(id_run, id_off);

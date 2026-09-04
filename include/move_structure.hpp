@@ -79,6 +79,12 @@ class MoveStructure {
         uint64_t fast_forward(uint64_t& offset, uint64_t index, uint64_t x);
 
         char illegal_char_substitute();
+        // Applies the --ignore-illegal-chars substitution across the whole read, once.
+        void substitute_illegal_chars(MoveQuery& mq);
+        // Walks rc(read) once, leaving for every present k-mer a row inside its reverse
+        // complement's BWT interval.
+        void prepare_rc_kmer_rows(MoveQuery& mq);
+        uint64_t rc_kmer_rows_walk(MoveQuery& mq, int32_t& pos_on_r, size_t read_len);
         bool check_alphabet(char& c);
         uint32_t compute_index(char row_char, char lookup_char);
 
