@@ -78,6 +78,7 @@ class MoveStructure {
         uint16_t LF_move(uint64_t& pointer, uint64_t& i, uint64_t id = std::numeric_limits<uint64_t>::max());
         uint64_t fast_forward(uint64_t& offset, uint64_t index, uint64_t x);
 
+        char illegal_char_substitute();
         bool check_alphabet(char& c);
         uint32_t compute_index(char row_char, char lookup_char);
 

@@ -380,6 +380,19 @@ void MoveStructure::set_rlbwt_thresholds(uint64_t idx, uint16_t i, uint16_t valu
 }
 #endif // for all the threshold related functions
 
+// The substitute --ignore-illegal-chars puts in place of an unknown character: 'A' in
+// mode 1, a base drawn at random in mode 2. The draw starts past the separator, which is
+// in the alphabet but is not a base. Out of line to keep check_alphabet's hot path small.
+__attribute__((noinline))
+char MoveStructure::illegal_char_substitute() {
+    if (movi_options->ignore_illegal_chars_status() == 1) {
+        return 'A';
+    }
+    thread_local ThreadRandom random_generator;
+    size_t first_base = use_separator() ? SEPARATOR_INDEX + 1 : 0;
+    return alphabet[first_base + random_generator.get_random() % (alphabet.size() - first_base)];
+}
+
 bool MoveStructure::check_alphabet(char& c) {
     if (use_separator()) {
         if (c == SEPARATOR) {
@@ -388,8 +401,7 @@ bool MoveStructure::check_alphabet(char& c) {
     }
     if (movi_options->ignore_illegal_chars_status() > 0) {
         if (alphamap[static_cast<uint64_t>(c)] == alphamap.size()) {
-            thread_local ThreadRandom random_generator;
-            c = movi_options->ignore_illegal_chars_status() == 1 ?  'A' : alphabet[ random_generator.get_random() % alphabet.size() ];
+            c = illegal_char_substitute();
             return true;
         }
     }
