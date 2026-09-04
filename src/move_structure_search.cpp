@@ -210,7 +210,9 @@ MoveInterval MoveStructure::backward_search(std::string& R, int32_t& pos_on_r, M
 
 MoveInterval MoveStructure::try_ftab(MoveQuery& mq, int32_t& pos_on_r, uint64_t& match_len, size_t ftab_k, bool rc) {
     auto& query_seq = mq.query();
-    if (ftab_k > 1 and pos_on_r >= ftab_k - 1) {
+    // pos_on_r goes negative once the look-ahead steps past the read start, so the
+    // comparison stays signed rather than widening it to size_t.
+    if (ftab_k > 1 and pos_on_r >= 0 and static_cast<size_t>(pos_on_r) + 1 >= ftab_k) {
         // uint64_t kmer_code = kmer_to_number(ftab_k, query_seq.substr(pos_on_r - ftab_k + 1, ftab_k), alphamap);
         uint64_t kmer_code = kmer_to_number(ftab_k, query_seq, pos_on_r - ftab_k + 1, alphamap, rc);
         if (kmer_code != std::numeric_limits<uint64_t>::max()) {
@@ -277,10 +279,16 @@ MoveInterval MoveStructure::initialize_backward_search(MoveQuery& mq, int32_t& p
         #pragma omp atomic
         all_initializations += 1;
     }
+    // Off the left end of the read, so there is nothing to seed with.
+    if (pos_on_r < 0) {
+        MoveInterval empty_interval;
+        empty_interval.make_empty();
+        return empty_interval;
+    }
     // Initialize assuming that the character at pos_on_r exists in the alphabet
     size_t ftab_k = movi_options->get_ftab_k();
     if (movi_options->is_multi_ftab()) {
-        while (ftab_k > 1 and pos_on_r >= ftab_k - 1) {
+        while (ftab_k > 1 and static_cast<size_t>(pos_on_r) + 1 >= ftab_k) {
             MoveInterval ftab_res = try_ftab(mq, pos_on_r, match_len, ftab_k, rc);
             if (!ftab_res.is_empty())
                 return ftab_res;
@@ -295,7 +303,7 @@ MoveInterval MoveStructure::initialize_backward_search(MoveQuery& mq, int32_t& p
     if (movi_options->is_multi_ftab() and ftab_k < movi_options->get_ftab_k()) {
         ftab_k += 2;
     }
-    if (pos_on_r >= ftab_k - 1 and movi_options->is_debug()) {
+    if (static_cast<size_t>(pos_on_r) + 1 >= ftab_k and movi_options->is_debug()) {
         #pragma omp atomic
         no_ftab += 1;
     }
