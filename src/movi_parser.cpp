@@ -1,3 +1,6 @@
+#include <sstream>
+#include <algorithm>
+#include <vector>
 #include "movi_parser.hpp"
 
 void add_all_groups(std::vector<std::string>& all_groups, std::string command) {
@@ -121,6 +124,12 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
         ("color", "Add colors to the index for multi-class classification")
         ("color-vectors", "Build a vector of vectors for colors (builds \"ref.fa.doc_sets.bin\")");
 
+    all_actions.push_back("kmers-from-mems");
+    main_actions.push_back("kmers-from-mems");
+    auto kmersFromMemsOptions = options.add_options("kmers-from-mems")
+        ("mems", "MEM stream written earlier by `movi query --mem`", cxxopts::value<std::string>())
+        ("mems-of", "Reads the MEM stream came from; optional, and used only to count invalid (non-ACGT) windows in the reports", cxxopts::value<std::string>());
+
     all_actions.push_back("inspect");
     main_actions.push_back("inspect");
     auto inspectOptions = options.add_options("inspect")
@@ -147,6 +156,8 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
     auto queryAdvancedOptions = options.add_options("query (advanced)")
         ("mem", "Compute the maximal exact matches (MEMs)")
         ("l,min-mem-length", "The minimum length of the MEMs", cxxopts::value<uint32_t>())
+        ("legacy-mems", "Write the Movi 2.0.0 MEM format (one line per MEM, no read length, reads without a MEM omitted) instead of the current one")
+        ("kmer-out", "With --mem, also write a --kmer-style membership view for each k in this comma-separated list (e.g. --kmer-out 31,47,63). Every k must be at least --min-mem-length.", cxxopts::value<std::string>())
         ("rpml", "Compute the pseudo-matching lengths using random repositioning (RPMLs)")
         ("kmer", "Search all the kmers")
         ("kmer-count", "Find the count of every kmer")
@@ -372,7 +383,20 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
                     movi_options.set_read_file(result["read"].as<std::string>());
                     if (result.count("out-file")) { movi_options.set_out_file(result["out-file"].as<std::string>()); }
                     if (result.count("k") >= 1) { movi_options.set_k(static_cast<uint32_t>(result["k"].as<uint32_t>())); }
-                    if (result.count("min-mem-length") >= 1) { movi_options.set_min_mem_length(static_cast<uint32_t>(result["min-mem-length"].as<uint32_t>())); }
+                    if (result.count("min-mem-length") >= 1) { movi_options.set_min_mem_length(static_cast<uint32_t>(result["min-mem-length"].as<uint32_t>())); movi_options.set_min_mem_length_explicit(true); }
+                    if (result.count("legacy-mems") >= 1) { movi_options.set_legacy_mems(true); }
+                    if (result.count("kmer-out") >= 1) {
+                        std::vector<uint32_t> ks;
+                        std::stringstream ss(result["kmer-out"].as<std::string>());
+                        std::string tok;
+                        while (std::getline(ss, tok, ',')) {
+                            if (tok.empty()) continue;
+                            ks.push_back(static_cast<uint32_t>(std::stoul(tok)));
+                        }
+                        std::sort(ks.begin(), ks.end());
+                        ks.erase(std::unique(ks.begin(), ks.end()), ks.end());
+                        movi_options.set_kmer_out_ks(ks);
+                    }
                     if (result.count("ftab-k") >= 1) { movi_options.set_ftab_k(static_cast<uint32_t>(result["ftab-k"].as<uint32_t>())); }
                     if (result.count("bin-width") >= 1) { movi_options.set_bin_width(static_cast<uint32_t>(result["bin-width"].as<uint32_t>())); }
                     if (result.count("multi-ftab") >= 1) { movi_options.set_multi_ftab(true); }
@@ -546,6 +570,35 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
                     }
                 } else {
                     const std::string message = "Please specify the index directory file.";
+                    cxxopts::throw_or_mimic<cxxopts::exceptions::invalid_option_format>(message);
+                }
+            } else if (command == "kmers-from-mems") {
+                if (result.count("mems") and result.count("kmer-out")) {
+                    movi_options.set_mems_file(result["mems"].as<std::string>());
+                    // Optional: each MEM record carries its read length, so the reads are
+                    // needed only to tell invalid windows from negative ones in the reports.
+                    if (result.count("mems-of")) {
+                        movi_options.set_read_file(result["mems-of"].as<std::string>());
+                    }
+                    if (result.count("out-file")) {
+                        movi_options.set_out_file(result["out-file"].as<std::string>());
+                    }
+                    std::vector<uint32_t> ks;
+                    std::stringstream ss(result["kmer-out"].as<std::string>());
+                    std::string tok;
+                    while (std::getline(ss, tok, ',')) {
+                        if (tok.empty()) continue;
+                        ks.push_back(static_cast<uint32_t>(std::stoul(tok)));
+                    }
+                    std::sort(ks.begin(), ks.end());
+                    ks.erase(std::unique(ks.begin(), ks.end()), ks.end());
+                    if (ks.empty()) {
+                        cxxopts::throw_or_mimic<cxxopts::exceptions::invalid_option_format>(
+                            std::string("--kmer-out listed no k values."));
+                    }
+                    movi_options.set_kmer_out_ks(ks);
+                } else {
+                    const std::string message = "Please specify --mems and --kmer-out (--mems-of is optional).";
                     cxxopts::throw_or_mimic<cxxopts::exceptions::invalid_option_format>(message);
                 }
             } else if (command == "inspect") {

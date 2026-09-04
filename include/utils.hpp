@@ -103,6 +103,11 @@ struct OutputFiles {
     std::ofstream fastforwards_file;
     std::ofstream colors_file;
     std::ofstream kmer_file;
+    // One membership view per --kmer-out k, plus its aggregate report. Parallel to
+    // MoviOptions::get_kmer_out_ks(), and opened even under --stdout, since stdout
+    // carries the MEM stream.
+    std::vector<std::ofstream> kmer_out_files;
+    std::vector<std::ofstream> kmer_out_reports;
     std::ofstream sa_entries_file;
     std::ofstream out_file;
 
@@ -195,7 +200,33 @@ void output_logs(std::ofstream& costs_file, std::ofstream& scans_file, std::ofst
 
 void output_read(MoveQuery& mq);
 
-void output_mems(bool to_stdout, std::ostream& mems_file, MoveQuery& mq);
+void output_mems(bool to_stdout, std::ostream& mems_file, MoveQuery& mq,
+                 MoviOptions& movi_options);
+
+// Per-k tallies behind the --kmer-out aggregate reports: every length-k window of
+// every read is exactly one of positive, negative, or invalid (contains a non-ACGT
+// base), matching the accounting the k-mer query's own report uses.
+struct KmerViewAgg {
+    uint64_t num = 0;
+    uint64_t positive = 0;
+    uint64_t invalid = 0;
+    // False when the bases were not available, so invalid windows could not be told
+    // apart from negatives (kmers-from-mems run without the reads).
+    bool invalid_known = true;
+};
+
+// Render one read's MEMs as a --kmer-style membership line for each k in
+// movi_options.get_kmer_out_ks(), appending to `lines` (one entry per k, in the same
+// order) and folding that read's window tallies into `aggs`. A MEM [s,e) with
+// e - s >= k means every k-mer starting in [s, e-k] is present, so the union of those
+// ranges is exactly the run set the k-mer query reports.
+void output_kmer_views(MoveQuery& mq, MoviOptions& movi_options,
+                       std::vector<std::string>& lines,
+                       std::vector<KmerViewAgg>& aggs);
+
+// Write the per-k aggregate reports next to their membership views.
+void write_kmer_view_reports(MoviOptions& movi_options, OutputFiles& output_files,
+                             const std::vector<KmerViewAgg>& aggs);
 
 void open_output_files(MoviOptions& movi_options, OutputFiles& output_files);
 

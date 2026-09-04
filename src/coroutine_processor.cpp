@@ -119,14 +119,24 @@ struct OrderedEmitter {
     bool ordered = false;         // when true, buffer + write in input order; else completion order
     bool threaded = false;        // when true, guard emit() with the mutex (many worker threads)
     std::mutex mu;                // serializes emit()/finish() across worker threads
-    std::map<uint64_t, std::string> pending;  // completed lines awaiting their turn
+    std::map<uint64_t, std::vector<std::string>> pending;  // completed records awaiting their turn
     // Output destination, set per run by run_coroutine_query to the appropriate
     // output_files stream (or std::cout for --stdout) so coroutine output lands in
     // the same place as the sequential path.
     std::ostream* out = &std::cout;
+    // Every stream this run writes, ordered by the same read index: outs[0] is the
+    // primary stream (`out`), and any further entries are the --kmer-out membership
+    // views, one per requested k. Reassembling them together keeps all of them in
+    // input order with a single reorder buffer.
+    std::vector<std::ostream*> outs;
+    // Window tallies behind the --kmer-out reports, merged here under the same lock
+    // that serializes emit(), so worker threads never race on them.
+    std::vector<KmerViewAgg> aggs;
 
-    void write_line(const std::string& line) {
-        out->write(line.data(), line.size());
+    void write_line(const std::vector<std::string>& parts) {
+        for (size_t i = 0; i < parts.size() && i < outs.size(); i++) {
+            outs[i]->write(parts[i].data(), parts[i].size());
+        }
     }
     // Emit the line for read 'seq'. Writes immediately if it is the next read in
     // input order, then drains any consecutive buffered lines; otherwise buffers
@@ -134,14 +144,29 @@ struct OrderedEmitter {
     // running the body is taken under the mutex; a single-thread run skips the lock
     // entirely, so the sequential fast path pays no locking overhead.
     void emit(uint64_t seq, const std::string& line) {
+        emit(seq, std::vector<std::string>{line});
+    }
+    void emit(uint64_t seq, const std::vector<std::string>& parts,
+              const std::vector<KmerViewAgg>& read_aggs = {}) {
         if (threaded) {
             std::lock_guard<std::mutex> lk(mu);
-            emit_body(seq, line);
+            merge_aggs(read_aggs);
+            emit_body(seq, parts);
         } else {
-            emit_body(seq, line);
+            merge_aggs(read_aggs);
+            emit_body(seq, parts);
         }
     }
-    void emit_body(uint64_t seq, const std::string& line) {
+    void merge_aggs(const std::vector<KmerViewAgg>& read_aggs) {
+        if (read_aggs.empty()) return;
+        if (aggs.size() < read_aggs.size()) aggs.resize(read_aggs.size());
+        for (size_t i = 0; i < read_aggs.size(); i++) {
+            aggs[i].num += read_aggs[i].num;
+            aggs[i].positive += read_aggs[i].positive;
+            aggs[i].invalid += read_aggs[i].invalid;
+        }
+    }
+    void emit_body(uint64_t seq, const std::vector<std::string>& line) {
         if (!ordered) { write_line(line); return; }  // completion order (reorder disabled)
         if (seq == next_emit) {
             write_line(line);
@@ -160,7 +185,7 @@ struct OrderedEmitter {
     void finish() {
         for (auto& kv : pending) write_line(kv.second);
         pending.clear();
-        out->flush();
+        for (auto* o : outs) if (o) o->flush();
         next_emit = 0;  // reset for any subsequent run reusing this static emitter
     }
 };
@@ -856,8 +881,18 @@ MoveStructure::coroutine_task MoveStructure::query_mem_coroutine(
         // identical to the sequential/strand path by construction; the reorder
         // buffer still emits in input order.
         std::ostringstream oss;
-        output_mems(false, oss, mq);
-        g_emitter.emit(read_data.seq, oss.str());
+        output_mems(false, oss, mq, *movi_options);
+        if (movi_options->is_kmer_out()) {
+            // parts[0] is the MEM record; output_kmer_views appends one membership
+            // line per k, in the same order as the streams the emitter holds.
+            std::vector<std::string> parts;
+            parts.push_back(oss.str());
+            std::vector<KmerViewAgg> read_aggs;
+            output_kmer_views(mq, *movi_options, parts, read_aggs);
+            g_emitter.emit(read_data.seq, parts, read_aggs);
+        } else {
+            g_emitter.emit(read_data.seq, oss.str());
+        }
     }
     co_return;
 }
@@ -1082,13 +1117,21 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
 // already-deserialized index. The engine does not own index construction -- the
 // caller loads the index and sets up ftab/kmerbv before handing it over here.
 void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concurrency,
-                         int nthreads, const CoroutineQueryOptions& opts, std::ostream& out) {
+                         int nthreads, const CoroutineQueryOptions& opts, std::ostream& out,
+                         std::vector<std::ofstream>* kmer_out_files,
+                         std::vector<KmerViewAgg>* kmer_aggs) {
     init_buffered_io();
     if (nthreads < 1) nthreads = 1;
     if (concurrency < 1) concurrency = 1;
     const bool threaded = nthreads > 1;
 
     g_emitter.out = &out;
+    g_emitter.outs.clear();
+    g_emitter.outs.push_back(&out);
+    if (kmer_out_files) {
+        for (auto& f : *kmer_out_files) g_emitter.outs.push_back(&f);
+    }
+    g_emitter.aggs.clear();
     // No per-run PML header is written here: PML output goes through the shared
     // output_base_stats (per-read). When writing to a file, the one-time BPFHeader is
     // written by open_output_files; stdout PML has no header. This matches the
@@ -1204,6 +1247,7 @@ void run_coroutine_query(MoveStructure& mv, const string& fastq_file, int concur
 
     // Emit any buffered output in input order and flush (part of the timed region).
     g_emitter.finish();
+    if (kmer_aggs) *kmer_aggs = g_emitter.aggs;
 
     // Calculate final statistics
     auto end_time = steady_clock::now();

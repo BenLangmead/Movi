@@ -33,4 +33,6 @@ struct CoroutineQueryOptions {
 // single-threaded path with no locking overhead.
 void run_coroutine_query(MoveStructure& mv, const std::string& fastq_file,
                          int concurrency, int nthreads,
-                         const CoroutineQueryOptions& opts, std::ostream& out);
+                         const CoroutineQueryOptions& opts, std::ostream& out,
+                         std::vector<std::ofstream>* kmer_out_files = nullptr,
+                         std::vector<KmerViewAgg>* kmer_aggs = nullptr);
