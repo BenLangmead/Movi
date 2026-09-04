@@ -107,18 +107,27 @@ class MoviOptions {
         //   sshash : suppress per-k-mer lines; print SSHash's aggregate query report
         //            (num_kmers / num_positive_kmers / num_negative_kmers /
         //             num_invalid_kmers) once at the end of the run
-        enum class OutputFormat { movi, kmc, sshash };
+        //   perfect_id : one '<read>\t<pos>\t<present>\t<id>' row per length-k window
+        //            of every read, in input order, with present 1/0 and id -1 for an
+        //            absent window. The id is the minimal perfect hash of the canonical
+        //            k-mer, numbered by BWT row and dense over [0, num_kmers). A
+        //            dictionary answering the same query numbers by its own layout, so
+        //            the two numberings are permutations of each other and the values do
+        //            not agree.
+        enum class OutputFormat { movi, kmc, sshash, perfect_id };
         OutputFormat get_output_format() { return output_format; }
         bool set_output_format(const std::string& s) {
             if (s == "movi") output_format = OutputFormat::movi;
             else if (s == "kmc") output_format = OutputFormat::kmc;
             else if (s == "sshash") output_format = OutputFormat::sshash;
+            else if (s == "perfect-id") output_format = OutputFormat::perfect_id;
             else return false;
             return true;
         }
         bool is_output_format_movi()   { return output_format == OutputFormat::movi; }
         bool is_output_format_kmc()    { return output_format == OutputFormat::kmc; }
         bool is_output_format_sshash() { return output_format == OutputFormat::sshash; }
+        bool is_output_format_perfect_id() { return output_format == OutputFormat::perfect_id; }
 
         std::string get_ref_file() { return ref_file; }
         std::string get_bwt_file() { return bwt_file; }

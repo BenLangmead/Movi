@@ -334,12 +334,35 @@ void output_kmers(bool to_stdout, std::ostream& kmer_file, size_t all_kmer_count
         // k-mer's occurrence multiplicity.
         size_t k = movi_options.get_k();
         std::string& seq = mq.query();
-        for (auto& pc : mq.get_kmer_pos_count()) {
-            int32_t pos = pc.first;
+        for (auto& hit : mq.get_kmer_hits()) {
+            int32_t pos = hit.pos;
             if (pos < 0 || pos + static_cast<int32_t>(k) > static_cast<int32_t>(seq.size())) continue;
             std::string km = seq.substr(pos, k);
             std::string rc = reverse_complement(km);
-            out << (km <= rc ? km : rc) << "\t" << pc.second << "\n";
+            out << (km <= rc ? km : rc) << "\t" << hit.count << "\n";
+        }
+    } else if (movi_options.is_output_format_perfect_id()) {
+        // One row per length-k window in input order: read, position, present 1/0, and
+        // the id or -1. Absent windows get a row too, so the stream lines up row for row
+        // with another tool's over the same reads. The id is rank(min(lb(x), lb(rc(x))))
+        // over the canonical bitvector B_k, which numbers a k-mer by its BWT row.
+        size_t k = movi_options.get_k();
+        std::string& seq = mq.query();
+        if (seq.size() >= k) {
+            size_t windows = seq.size() - k + 1;
+            // The search reports hits right to left, so scatter them to recover order.
+            std::vector<uint64_t> ids(windows, MoveQuery::absent_id);
+            for (auto& hit : mq.get_kmer_hits()) {
+                if (hit.pos >= 0 && static_cast<size_t>(hit.pos) < windows)
+                    ids[hit.pos] = hit.id;
+            }
+            std::string& read_id = mq.get_query_id();
+            for (size_t p = 0; p < windows; ++p) {
+                bool present = ids[p] != MoveQuery::absent_id;
+                out << read_id << "\t" << p << "\t" << (present ? 1 : 0) << "\t";
+                if (present) out << ids[p]; else out << -1;
+                out << "\n";
+            }
         }
     } else if (movi_options.is_output_format_sshash()) {
         // No per-read output; the aggregate report is printed once at the end.
