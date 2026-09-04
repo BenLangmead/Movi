@@ -308,7 +308,15 @@ MoveInterval MoveStructure::initialize_backward_search(MoveQuery& mq, int32_t& p
         no_ftab += 1;
     }
     auto& query_seq = mq.query();
-    auto first_char_index = alphamap[rc ? complement(query_seq[pos_on_r]): query_seq[pos_on_r]] + 1;
+    // alphamap yields its sentinel for a character outside the alphabet, which would index
+    // first_runs past its end. check_alphabet also applies any --ignore-illegal-chars substitution.
+    char first_char = rc ? complement(query_seq[pos_on_r]) : query_seq[pos_on_r];
+    if (!check_alphabet(first_char)) {
+        MoveInterval empty_interval;
+        empty_interval.make_empty();
+        return empty_interval;
+    }
+    auto first_char_index = alphamap[static_cast<uint64_t>(first_char)] + 1;
     MoveInterval interval(
         first_runs[first_char_index],
         first_offsets[first_char_index],
