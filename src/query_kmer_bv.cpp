@@ -209,13 +209,23 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
         // also built plain/sd_vector/rrr_vector and a run-heads+Gi+E hybrid to map
         // the space/speed frontier; this run-local form was both smallest and
         // fastest, so it is the only representation kept.)
+        //
+        // The same pass decomposes B_k for the run-local id query, recording per run
+        // whether the head carries a mark and the within-run offsets of those that do
+        // not. Splitting head marks off pays: they are the great majority, so one bit
+        // per run covers most of them and only the rest need an entry.
         sdsl::bit_vector& cbv = cbvs.at(k);
         sdsl::bit_vector ex(r, 0);   // ex[run] = 1 iff that run head is not a group-start
         sdsl::bit_vector hi(r, 0);   // hi[run] = 1 iff that run contains an interior group-start
         std::vector<uint64_t> gioff_vec;   // within-run offset of each interior, in (run,offset) order
         std::vector<bool>     gimark_vec;  // 1 at the FIRST interior of each run
+        sdsl::bit_vector idhd(r, 0);  // idhd[run] = 1 iff that run head carries a B_k mark
+        sdsl::bit_vector idhi(r, 0);  // idhi[run] = 1 iff that run has a B_k mark at offset > 0
+        std::vector<uint64_t> idoff_vec;   // within-run offset of each such mark, in (run,offset) order
+        std::vector<bool>     idmark_vec;  // 1 at the first such mark of each run
         {
             uint64_t prev_run = std::numeric_limits<uint64_t>::max();
+            uint64_t id_prev_run = std::numeric_limits<uint64_t>::max();
             uint64_t run = 0;
             for (uint64_t p = 0; p < length; ++p) {
                 while (run + 1 < all_p.size() and all_p[run + 1] <= p) run++;
@@ -227,6 +237,16 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
                     prev_run = run;
                 }
                 if (is_head && !cbv[p]) ex[run] = 1;
+                if (bv[p]) {
+                    if (is_head) {
+                        idhd[run] = 1;
+                    } else {
+                        idhi[run] = 1;
+                        idoff_vec.push_back(p - all_p[run]);
+                        idmark_vec.push_back(run != id_prev_run);
+                        id_prev_run = run;
+                    }
+                }
             }
         }
         sdsl::store_to_file(hi, index_dir + "/kmerbv." + ks_ + ".cnt.hi");
@@ -247,6 +267,33 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
         for (size_t i = 0; i < gimark_vec.size(); ++i) if (gimark_vec[i]) gimark[i] = 1;
         sdsl::store_to_file(gimark, index_dir + "/kmerbv." + ks_ + ".cnt.gimark");
 
+        // Run-local id structure for B_k, written under the kmerbv.<k>.id.* names. Its
+        // offsets take the count structure's delta transform and dac_vector coding, the
+        // marks in a run being increasing and close together.
+        sdsl::store_to_file(idhd, index_dir + "/kmerbv." + ks_ + ".id.hd");
+        sdsl::int_vector<> idoff_dt(idoff_vec.size(), 0, 64);
+        { uint64_t prev = 0; for (size_t i = 0; i < idoff_vec.size(); ++i) {
+              uint64_t v = idoff_vec[i]; idoff_dt[i] = idmark_vec[i] ? v : (v - prev); prev = v; } }
+        sdsl::util::bit_compress(idoff_dt);
+        sdsl::dac_vector<2> idoff_dac(idoff_dt);
+        sdsl::store_to_file(idoff_dac, index_dir + "/kmerbv." + ks_ + ".id.gioffdac");
+        // Separator vector: run i contributes a 1 followed by one 0 per off-head mark, so
+        // its zeros stand for its own entries and everything below its 1 belongs to
+        // earlier runs. idmark_vec flags each run's first entry.
+        sdsl::bit_vector idsep(r + idoff_vec.size(), 0);
+        {
+            uint64_t pos = 0, e = 0;
+            for (uint64_t i = 0; i < r; ++i) {
+                idsep[pos++] = 1;
+                if (idhi[i]) {
+                    do { pos++; e++; } while (e < idoff_vec.size() and !idmark_vec[e]);
+                }
+            }
+        }
+        sdsl::store_to_file(idsep, index_dir + "/kmerbv." + ks_ + ".id.sep");
+        uint64_t sz_runlocal = sdsl::size_in_bytes(idhd) + sdsl::size_in_bytes(idsep) +
+                               sdsl::size_in_bytes(idoff_dac);
+
         // Sidecar metadata so the query / access side knows the id space:
         //   line 1: canonical flag (0|1);  line 2: num_kmers (= ones).
         {
@@ -260,7 +307,10 @@ void MoveStructure::build_kmerbv(const std::vector<uint32_t>& ks) {
                  std::to_string(sz_dense ? (100 * sz_sd / sz_dense) : 0) +
                  "% of dense bv+rank=" + std::to_string(sz_dense / 1048576) + "MB" +
                  (movi_options->is_kmerbv_id_dense() ? ", dense also written" : "") +
-                 "); k-mer files at " + index_dir + "/kmerbv." + ks_ + ".*");
+                 "), run-local id=" + std::to_string(sz_runlocal / 1048576) + "MB over " +
+                 std::to_string(r) + " runs / " + std::to_string(length) + " rows with " +
+                 std::to_string(idoff_vec.size()) + " off-head marks; k-mer files at " +
+                 index_dir + "/kmerbv." + ks_ + ".*");
     }
 }
 
@@ -287,20 +337,37 @@ void MoveStructure::load_kmerbv(uint32_t k) {
     std::string rank_path = index_dir + "/kmerbv." + ks_ + ".rank";
     std::string sd_path   = index_dir + "/kmerbv." + ks_ + ".sd";
 
-    // MPHF-id B_k representation. Default: sparse Elias-Fano sd_vector (small,
-    // SSHash-competitive). MOVI_ID_BV=dense forces the dense bit_vector+rank rep
-    // (~6% faster query, ~4-5x larger; only present if built with --id-bv-dense).
+    std::string rl_pfx   = index_dir + "/kmerbv." + ks_ + ".id";
+
+    // B_k representation, chosen by MOVI_ID_BV with values "runlocal", "sd" and "dense".
+    // Run-local is preferred whenever the index carries it, answering rank from per-run
+    // records alone so the id path touches neither absolute rows nor the sampled
+    // checkpoints addressing them needs. The absolute-row reps stay available for
+    // comparison and as a fallback, and an index predating the run-local files picks sd.
     const char* idbv_env = std::getenv("MOVI_ID_BV");
-    bool want_dense = (idbv_env != nullptr && std::string(idbv_env) == "dense");
-    bool sd_ok = std::filesystem::exists(sd_path);
+    std::string want = (idbv_env != nullptr) ? std::string(idbv_env) : std::string();
+    bool sd_ok    = std::filesystem::exists(sd_path);
     bool dense_ok = std::filesystem::exists(bv_path);
-    if (!sd_ok && !dense_ok) {
+    bool rl_ok    = std::filesystem::exists(rl_pfx + ".hd");
+    if (!sd_ok && !dense_ok && !rl_ok) {
         throw std::runtime_error(
             ERROR_MSG("K-mer id bitvector for k=" + ks_ + " not found at " + sd_path +
                       ". Run 'movi build-kmerbv --index <dir> --kmer-lengths " + ks_ + "' first."));
     }
-    kmerbv_use_sd = sd_ok && !(want_dense && dense_ok);
-    if (kmerbv_use_sd) {
+    if (want == "runlocal" && !rl_ok) {
+        throw std::runtime_error(
+            ERROR_MSG("MOVI_ID_BV=runlocal was requested but the run-local id files for k=" +
+                      ks_ + " are missing (expected " + rl_pfx + ".hd). Rerun 'movi build-kmerbv'."));
+    }
+    kmerbv_use_runlocal = rl_ok && (want.empty() || want == "runlocal");
+    kmerbv_use_sd = !kmerbv_use_runlocal && sd_ok && !(want == "dense" && dense_ok);
+    if (kmerbv_use_runlocal) {
+        sdsl::load_from_file(kmerbv_idhd,    rl_pfx + ".hd");
+        sdsl::load_from_file(kmerbv_idsep,   rl_pfx + ".sep");
+        sdsl::load_from_file(kmerbv_idgioff, rl_pfx + ".gioffdac");   // delta-transformed
+        kmerbv_idhd_rank = sdsl::rank_support_v<>(&kmerbv_idhd);
+        kmerbv_idsep_sel = sdsl::select_support_mcl<1>(&kmerbv_idsep);
+    } else if (kmerbv_use_sd) {
         sdsl::load_from_file(kmerbv_sd, sd_path);
         kmerbv_sd_rank = sdsl::sd_vector<>::rank_1_type(&kmerbv_sd);
         kmerbv_sd_sel  = sdsl::sd_vector<>::select_1_type(&kmerbv_sd);
@@ -335,8 +402,9 @@ void MoveStructure::load_kmerbv(uint32_t k) {
     // checkpoint every kmerbv_allp_S runs and reconstruct exact positions from the
     // move structure's run lengths at query (reconstruct_allp). The stride defaults
     // to 16 and is overridable via MOVI_ALLP_SAMPLE for space/speed benchmarking.
-    // --kmer-count is run-local and needs none.
-    if (!movi_options->is_kmer_count()) {
+    // --kmer-count is run-local and needs none, and neither does the run-local id
+    // representation, which never forms an absolute row.
+    if (!movi_options->is_kmer_count() && !kmerbv_use_runlocal) {
         kmerbv_allp_S = 16;
         if (const char* s = std::getenv("MOVI_ALLP_SAMPLE")) {
             uint64_t v = std::strtoull(s, nullptr, 10);
