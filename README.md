@@ -60,6 +60,9 @@ make -j4
       --pml           Compute the pseudo-matching lengths (default)
       --zml           Compute the Ziv-Merhav cross parsing length)
       --count         Compute the count queries
+      --mem           Compute the maximal exact matches (MEMs); needs an index built with --separators
+  -L, --min-mem-length arg
+                      The minimum length of the MEMs
       --classify      Enable binary classification of the reads
       --filter        Filter the reads based on the matching lengths, output the filtered reads to stdout
   -v, --invert        Output the not found reads during filtering

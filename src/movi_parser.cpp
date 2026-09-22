@@ -155,7 +155,7 @@ bool parse_command(int argc, char** argv, MoviOptions& movi_options, bool supres
     // Advanced query options (hidden by default, shown with --help-all)
     auto queryAdvancedOptions = options.add_options("query (advanced)")
         ("mem", "Compute the maximal exact matches (MEMs)")
-        ("l,min-mem-length", "The minimum length of the MEMs", cxxopts::value<uint32_t>())
+        ("L,min-mem-length", "The minimum length of the MEMs", cxxopts::value<uint32_t>())
         ("legacy-mems", "Write the Movi 2.0.0 MEM format (one line per MEM, no read length, reads without a MEM omitted) instead of the current one")
         ("kmer-out", "With --mem, also write a --kmer-style membership view for each k in this comma-separated list (e.g. --kmer-out 31,47,63). Every k must be at least --min-mem-length.", cxxopts::value<std::string>())
         ("rpml", "Compute the pseudo-matching lengths using random repositioning (RPMLs)")
