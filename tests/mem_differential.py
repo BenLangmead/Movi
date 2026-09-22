@@ -342,17 +342,14 @@ def main():
 def membership(path, k):
     """Reads a k-mer membership file into {id: (found, total, present k-mer starts)}.
 
-    Each line is "<id>\t<found>/<total>\t<start>:<run> ...". The two producers may split
-    one run of consecutive present k-mers differently, so runs are expanded to the set
-    of present starts. A read shorter than k has no k-mers; its total is taken as 0
-    whatever the file says.
+    Each line is "<id>\t<found>/<total>\t<start>:<run> ...". Runs are expanded to the set
+    of present starts, which is what the failure message reports on; the files themselves
+    are compared byte for byte by the caller.
     """
     out = {}
     for line in open(path):
         parts = line.rstrip("\n").split("\t")
         found, total = map(int, parts[1].split("/"))
-        if total > 1 << 40:
-            total = 0
         starts = set()
         for tok in (parts[2].split() if len(parts) > 2 else []):
             st, run = map(int, tok.split(":"))
@@ -390,6 +387,11 @@ def kmer_out_check(binary, idx, reads, sdir, tag, ftab_ks):
             q = sorted(bad)[0]
             fails.append("%s kmer-out k=%d disagrees with --kmer on %d reads, e.g. %s: %r vs %r"
                          % (tag, k, len(bad), q, a.get(q), b.get(q)))
+        elif open(a_path).read() != open(b_path).read():
+            # Same membership, so the two must also be the same bytes: both write
+            # maximal runs, descending by start, one line per read in input order.
+            fails.append("%s kmer-out k=%d agrees with --kmer on membership but not on bytes"
+                         % (tag, k))
     return fails
 
 

@@ -102,7 +102,7 @@ void handle_kmer(MoveQuery& mq, MoviOptions& movi_options,
     if (movi_options.is_output_format_sshash()) {
         size_t k = movi_options.get_k();
         size_t L = mq.query().length();
-        size_t total = (L >= k) ? (L - k + 1) : 0;
+        size_t total = kmer_window_count(L, k);
         size_t invalid = count_invalid_kmer_windows(mq.query(), k);
         // Accumulated per thread and merged once the query is over, like the rest of
         // the k-mer tallies, so threads do not contend for these cache lines.
@@ -119,7 +119,8 @@ void handle_kmer(MoveQuery& mq, MoviOptions& movi_options,
         #pragma omp critical(movi_output)
         {
             output_kmers(movi_options.write_stdout_enabled(), output_files.kmer_file,
-                         mq.query().length() - movi_options.get_k() + 1, mq, movi_options);
+                         kmer_window_count(mq.query().length(), movi_options.get_k()),
+                         mq, movi_options);
         }
     }
 }

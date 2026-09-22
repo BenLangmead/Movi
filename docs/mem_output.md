@@ -64,6 +64,12 @@ the `.mems` file it came from:
 
 The k-mer format is left as released rather than changed to match.
 
+Two things about the k-mer record are the same in both producers, and a consumer may
+rely on them. A run token is maximal, so the k-mer just before a run and the one just
+after it are absent and the tokens describe the read rather than how the search
+advanced. And the denominator of `found/total` is the number of length-k windows the
+read holds, `max(read_len - k + 1, 0)`, so a read shorter than k reads `0/0`.
+
 ## Which MEMs are reported
 
 `--min-mem-length L` reports the MEMs of length `L` or more. It acts purely as a filter

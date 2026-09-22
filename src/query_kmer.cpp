@@ -156,7 +156,7 @@ void MoveStructure::query_all_kmers(MoveQuery& mq, bool kmer_counts) {
                 } else {
                     uint64_t found_kmer_count = query_kmers_from(mq, pos_on_r);
                     // Outputing the kmer matches only works for the non-count mode (for now)
-                    mq.add_kmer(pos_on_r + 2 - k, found_kmer_count);
+                    mq.add_kmer_run(pos_on_r + 2 - k, found_kmer_count);
                                         ks.positive_kmers += found_kmer_count;
                 }
             }
