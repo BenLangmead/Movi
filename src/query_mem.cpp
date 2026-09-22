@@ -108,41 +108,67 @@ bool MoveStructure::query_mem_bml(MoveQuery& mq, int32_t& pos_on_r, int32_t& min
 
 uint64_t MoveStructure::query_all_mems(MoveQuery& mq) {
     std::string& query_seq = mq.query();
+    const size_t m = query_seq.length();
 
-    size_t ftab_k = movi_options->get_ftab_k();
     // At the time, the initialization works if ftab with ftab_k exists only
     // And the multi-ftab strategy must be turned off
     movi_options->set_multi_ftab(false);
-    
-    size_t s = 0; // start, inclusive
-    size_t e = 0; // end, exclusive
-    uint64_t match_len = 0; // bases matched so far
-    int32_t init_pos = s; 
-    MoveBiInterval bi_interval = initialize_bidirectional_search(mq, init_pos, match_len);
 
-    // Forward extension to find right end of MEM (exclusive)
-    while (s < query_seq.length()) {
-        // Extend MEM until mismatch
-        MoveBiInterval bi_interval_before_extension = bi_interval;
-        while (s + match_len < query_seq.length() && extend_right(query_seq[s + match_len], bi_interval)) {
-            bi_interval_before_extension = bi_interval;
+    // bi_interval holds the occurrences of Q[s, s + match_len). match_len == 0 means no
+    // match is held, and the next MEM is seeded from Q[s] alone.
+    size_t s = 0;
+    uint64_t match_len = 0;
+    MoveBiInterval bi_interval;
+
+    while (s < m) {
+        if (match_len == 0) {
+            // A character outside the alphabet is in no MEM.
+            if (!check_alphabet(query_seq[s])) {
+                ++s;
+                continue;
+            }
+            int32_t init_pos = s;
+            bi_interval = initialize_bidirectional_search(mq, init_pos, match_len);
+            // s is 0 or follows an illegal character, so no ftab k-mer ending at s is
+            // usable and the seed is Q[s] alone; init_pos is taken back in case the
+            // seed ever covers characters left of s.
+            s = init_pos;
+        }
+
+        // Extend right until mismatch. A failed extension leaves the intervals
+        // modified, so the last good pair is restored.
+        while (s + match_len < m) {
+            MoveBiInterval bi_interval_before_extension = bi_interval;
+            if (!extend_right(query_seq[s + match_len], bi_interval)) {
+                bi_interval = bi_interval_before_extension;
+                break;
+            }
             ++match_len;
         }
-        e = s + match_len;
-        mq.add_mem(s, e, bi_interval_before_extension.fw_interval.count(rlbwt));
+        size_t e = s + match_len;
+        mq.add_mem(s, e, bi_interval.fw_interval.count(rlbwt));
+        if (e >= m) break;
 
-        // Backward extension to find next MEM start
-        match_len = 0;
-        if (e < query_seq.length()) {
-            init_pos = e;
-            bi_interval = initialize_bidirectional_search(mq, init_pos, match_len);
-            while (extend_left(query_seq[e - match_len], bi_interval)) {
-                bi_interval_before_extension = bi_interval;
-                ++match_len;
-            }
-            bi_interval = bi_interval_before_extension;
+        // The next MEM is the longest match ending at e. It starts after s, because
+        // Q[s, e] does not occur (the MEM above stopped short of e).
+        if (!check_alphabet(query_seq[e])) {
+            s = e + 1;
+            match_len = 0;
+            continue;
         }
-        s = e - match_len + 1;
+        int32_t left = e;
+        uint64_t seed_len = 0;
+        bi_interval = initialize_bidirectional_search(mq, left, seed_len);
+        while (left - 1 > static_cast<int64_t>(s)) {
+            MoveBiInterval bi_interval_before_extension = bi_interval;
+            if (!extend_left(query_seq[left - 1], bi_interval)) {
+                bi_interval = bi_interval_before_extension;
+                break;
+            }
+            --left;
+        }
+        s = left;
+        match_len = e - left + 1;
     }
 
     return mq.get_mems().size();

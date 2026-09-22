@@ -138,6 +138,10 @@ bool MoveStructure::extend_left(char c, MoveBiInterval& bi_interval) {
 }
 
 bool MoveStructure::extend_right(char c, MoveBiInterval& bi_interval) {
+    // complement masks legality, so check legality first
+    if (!check_alphabet(c)) {
+        return false;
+    }
     char c_ = complement(c);
     if (extend_bidirectional(c_, bi_interval.rc_interval, bi_interval.fw_interval)) {
         bi_interval.match_len += 1;
@@ -310,11 +314,15 @@ MoveInterval MoveStructure::initialize_backward_search(MoveQuery& mq, int32_t& p
     auto& query_seq = mq.query();
     // alphamap yields its sentinel for a character outside the alphabet, which would index
     // first_runs past its end. check_alphabet also applies any --ignore-illegal-chars substitution.
-    char first_char = rc ? complement(query_seq[pos_on_r]) : query_seq[pos_on_r];
+    // complement masks legality, so check legality first
+    char first_char = query_seq[pos_on_r];
     if (!check_alphabet(first_char)) {
         MoveInterval empty_interval;
         empty_interval.make_empty();
         return empty_interval;
+    }
+    if (rc) {
+        first_char = complement(first_char);
     }
     auto first_char_index = alphamap[static_cast<uint64_t>(first_char)] + 1;
     MoveInterval interval(
@@ -368,6 +376,11 @@ uint64_t MoveStructure::backward_search_step(std::string& R, int32_t& pos_on_r, 
 
 // Must be called using reverse interval
 bool MoveStructure::forward_search_step(char c, MoveInterval& rc_interval) {
+    // complement masks legality, so check legality first
+    if (!check_alphabet(c)) {
+        rc_interval.make_empty();
+        return false;
+    }
     return backward_search_step(complement(c), rc_interval);
 }
 

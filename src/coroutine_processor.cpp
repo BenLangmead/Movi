@@ -654,7 +654,8 @@ MoveStructure::coroutine_task MoveStructure::query_pml_coroutine(
 
 
 // Coroutine MEM query with latency hiding. Mirrors MoveStructure::query_mems /
-// query_mem_bml (min_mem_length > 1 path). Yields only at the LF destination
+// query_mem_bml (min_mem_length > 1 path). The all-MEM search (min_mem_length <= 1,
+// query_all_mems) has no coroutine body, and movi.cpp runs it on the sequential path. Yields only at the LF destination
 // jump inside each backward/forward search step, and before ftab lookups.
 // extend_bidirectional is inlined so the single co_yield can be placed at the
 // fw LF_move; the subsequent sequential work (skip scan, rc walk) gets no yield
@@ -844,7 +845,10 @@ MoveStructure::coroutine_task MoveStructure::query_mem_coroutine(
             for (i = static_cast<size_t>(pos_on_r) + min_mem_length;
                  i < static_cast<size_t>(qlen); ++i) {
                 rc_before = rc_interval;
-                if (!step_prep(rc_interval, complement(query_seq[i]))) {
+                // complement masks legality, so check legality first
+                char fc = query_seq[i];
+                if (!check_alphabet(fc)) break;
+                if (!step_prep(rc_interval, complement(fc))) {
                     rc_interval = rc_before; break;
                 }
                 co_yield monostate{};       // hide LF destination miss on rc
@@ -863,7 +867,9 @@ MoveStructure::coroutine_task MoveStructure::query_mem_coroutine(
                 MoveInterval fw_interval = initialize_backward_search(mq, init_pos, match_len);
                 ++match_len;
                 --init_pos;
-                for (i = 0; i <= static_cast<size_t>(init_pos - (pos_on_r + 1)); ++i) {
+                // Signed comparison, as in query_mem_bml: the bound is -1 when the ftab
+                // seed already reaches pos_on_r + 1, and a size_t cast would wrap.
+                for (i = 0; static_cast<int32_t>(i) <= init_pos - (pos_on_r + 1); ++i) {
                     if (!step_prep(fw_interval, query_seq[init_pos - i])) break;
                     co_yield monostate{};   // hide LF destination miss on fw
                     step_finish(fw_interval);

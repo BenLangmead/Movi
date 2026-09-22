@@ -502,6 +502,12 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
                     "perfect-id needs the per-k-mer bitvector ids."));
             }
         }
+        // Without separators a match can cross a record boundary, which the
+        // bidirectional search reports as a MEM that is not in the reference.
+        if (!mv_.use_separator()) {
+            throw std::runtime_error(ERROR_MSG("--mem requires an index built with --separators. "
+                "Rebuild with `movi build --separators`."));
+        }
         if (movi_options.get_ftab_k() == 0) {
             throw std::runtime_error(ERROR_MSG("MEM finding requires an ftab, but none was found in the index. Build one with `movi ftab --ftab-k 12` (a deeper ftab means faster MEM search; ftab-12 is recommended). It is then auto-selected, or pass --ftab-k <k> explicitly."));
         } else if (movi_options.get_min_mem_length() > 1 &&
@@ -546,10 +552,13 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
     // that is presence (F,F), plain count (T,F), and bitvector count (T,T); only the
     // MPHF-id query (--kmer --kmer-bv, i.e. bv without count) is excluded, since it has
     // no coroutine implementation and falls through to the sequential path. ZML and
-    // exact-count also fall through, having no coroutine variant.
+    // exact-count also fall through, having no coroutine variant, as does the all-MEM
+    // search (--min-mem-length <= 1), since the coroutine MEM body implements only the
+    // length-thresholded search.
     if (movi_options.is_coroutine()) {
+        const bool all_mems = movi_options.is_mem() && movi_options.get_min_mem_length() <= 1;
         const bool coroutine_routable =
-            movi_options.is_pml() || movi_options.is_mem() ||
+            movi_options.is_pml() || (movi_options.is_mem() && !all_mems) ||
             (movi_options.is_kmer() && !(movi_options.is_kmer_bv() && !movi_options.is_kmer_count()));
         if (coroutine_routable) {
             CoroutineQueryOptions copts;
@@ -575,8 +584,8 @@ void query(MoveStructure& mv_, MoviOptions& movi_options) {
         // byte-identically; warn so a benchmark does not silently attribute sequential
         // timings to the coroutine path.
         std::cerr << "[movi] note: --coroutine has no coroutine implementation for this query "
-                     "(MPHF-id --kmer --kmer-bv, ZML, or exact count); running the sequential "
-                     "path instead." << std::endl;
+                     "(MPHF-id --kmer --kmer-bv, ZML, exact count, or all-MEM --min-mem-length <= 1); "
+                     "running the sequential path instead." << std::endl;
     }
 #else
     if (movi_options.is_coroutine()) {
