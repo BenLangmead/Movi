@@ -49,7 +49,9 @@ bv queries (`query_kmers_count_bv`, `query_kmers_id_bv`). The small
 (`--kmer --kmer-bv`): k-mer presence, plain count (`--kmer-count`), and bitvector count
 (`--kmer-count --kmer-bv`) all run through `query_kmer_coroutine`, byte-identical to the
 sequential path. The MPHF-id query has no coroutine variant and falls through to the
-sequential path (as do ZML and whole-read exact-count).
+sequential path (as do ZML, whole-read exact-count, and the all-MEM search,
+`--min-mem-length <= 1`, since `query_mem_coroutine` implements only the
+length-thresholded search). Every MEM query needs an index built with `--separators`.
 
 The k-mer-bitvector index also gives each k-mer a dense, collision-free MPHF id via
 `movi query --kmer --kmer-bv` (a drop-in for SSHash's lookup), built by
