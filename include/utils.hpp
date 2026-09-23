@@ -192,6 +192,12 @@ void output_base_stats(DataType data_type, bool to_stdout, std::ostream& output_
 
 void output_counts(bool to_stdout, std::ostream& count_file, size_t query_length, int32_t pos_on_r, uint64_t match_count, MoveQuery& mq);
 
+// Number of length-k windows in a read, the denominator of the k-mer output's
+// found/total field. A read shorter than k holds none.
+inline size_t kmer_window_count(size_t read_len, size_t k) {
+    return (k > 0 && read_len >= k) ? (read_len - k + 1) : 0;
+}
+
 size_t count_invalid_kmer_windows(const std::string& s, size_t k);
 void output_kmers(bool to_stdout, std::ostream& kmer_file, size_t all_kmer_count,
                   MoveQuery& mq, MoviOptions& movi_options);

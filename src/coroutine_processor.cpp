@@ -972,9 +972,8 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
         mq.set_query_id(read_data.name);
         std::string& query_seq = mq.query();
         const int32_t qlen = static_cast<int32_t>(query_seq.length());
-        // Match production's denominator exactly (movi.cpp output_kmers call),
-        // including the unsigned underflow when the read is shorter than k.
-        const uint64_t all_kmer_count = mq.length() - movi_options->get_k() + 1;
+        // The same denominator as the sequential path in movi.cpp.
+        const uint64_t all_kmer_count = kmer_window_count(mq.length(), movi_options->get_k());
 
         int32_t pos_on_r = qlen - 1;
 
@@ -1099,7 +1098,7 @@ MoveStructure::coroutine_task MoveStructure::query_kmer_coroutine(
                         mq.add_kmer(pos_on_r + 2 - k, found,
                                     std::numeric_limits<uint64_t>::max(), kc);
                     } else {
-                        mq.add_kmer(pos_on_r + 2 - k, found);
+                        mq.add_kmer_run(pos_on_r + 2 - k, found);
                     }
                     }
                 }

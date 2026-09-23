@@ -349,7 +349,7 @@ void output_kmers(bool to_stdout, std::ostream& kmer_file, size_t all_kmer_count
         size_t k = movi_options.get_k();
         std::string& seq = mq.query();
         if (seq.size() >= k) {
-            size_t windows = seq.size() - k + 1;
+            size_t windows = kmer_window_count(seq.size(), k);
             // The search reports hits right to left, so scatter them to recover order.
             std::vector<uint64_t> ids(windows, MoveQuery::absent_id);
             for (auto& hit : mq.get_kmer_hits()) {
@@ -465,7 +465,7 @@ void output_kmer_views(MoveQuery& mq, MoviOptions& movi_options,
 
     for (size_t ki = 0; ki < ks.size(); ki++) {
         const size_t k = ks[ki];
-        const size_t total = (read_len >= k) ? (read_len - k + 1) : 0;
+        const size_t total = kmer_window_count(read_len, k);
 
         // A MEM [start, end) long enough to hold a k-mer means every k-mer starting in
         // the closed range [start, end - k] is present. The MEM search walks the read

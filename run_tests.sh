@@ -191,6 +191,24 @@ else
 fi
 ((TOTAL_TESTS++))
 
+# k-mer output records (movi query --kmer / --kmer-count). Checks the found/total field
+# on reads bracketing k, including reads shorter than k, that run tokens are maximal
+# runs, that every path serving k-mer queries writes the same records, and that they
+# equal the MEM-derived --kmer-out view byte for byte.
+print_status "Running k-mer output regression..."
+echo "----------------------------------------"
+if bash "$PROJECT_ROOT/tests/regression_kmer_output.sh" "$(pwd)"; then
+    echo "----------------------------------------"
+    print_success "k-mer output regression passed"
+    echo ""
+else
+    echo "----------------------------------------"
+    print_error "k-mer output regression failed"
+    echo ""
+    ((FAILED_TESTS++))
+fi
+((TOTAL_TESTS++))
+
 # Coroutine PML across threshold modes (differential: movi query --pml --coroutine vs
 # sequential in regular-, sampled-, and blocked-thresholds). Serializes each mode's
 # index from a checked-in, mode-independent precursor set (no pfp/grlBWT needed), then

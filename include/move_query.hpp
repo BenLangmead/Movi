@@ -58,6 +58,27 @@ class MoveQuery {
             }
         }
 
+        // Records a run of kmer_count present k-mers starting at pos_on_r. A run abutting
+        // the previous record extends it, so a token holds a maximal run. Runs arrive with
+        // descending start, so only the last record can abut.
+        void add_kmer_run(int32_t pos_on_r, uint64_t kmer_count) {
+            if (kmer_count == 0) return;
+            if (!kmer_hits.empty() && kmer_hits.back().id == absent_id &&
+                static_cast<int64_t>(pos_on_r) + static_cast<int64_t>(kmer_count) ==
+                    static_cast<int64_t>(kmer_hits.back().pos)) {
+                found_kmer_count += kmer_count;
+                kmer_hits.back().pos = pos_on_r;
+                kmer_hits.back().count += kmer_count;
+                // Rewrite the earlier piece's token, which is the tail of the string.
+                matching_lengths_string.resize(last_kmer_token_offset);
+                matching_lengths_string += std::to_string(kmer_hits.back().pos) + ":" +
+                                           std::to_string(kmer_hits.back().count) + " ";
+            } else {
+                last_kmer_token_offset = matching_lengths_string.size();
+                add_kmer(pos_on_r, kmer_count);
+            }
+        }
+
         void add_color(uint64_t color_id) {
             // Check if the color id is ever larger than 2^32?
 
@@ -123,6 +144,8 @@ class MoveQuery {
         std::string query_id = "";
         std::string query_string = "";
         std::string matching_lengths_string = "";
+        // Where the last k-mer run token begins, for add_kmer_run to rewrite.
+        size_t last_kmer_token_offset = 0;
         std::vector<kmer_hit_t> kmer_hits;  // one entry per present k-mer
         std::vector<uint64_t> sa_entries;
         std::vector<uint16_t> matching_lens;
